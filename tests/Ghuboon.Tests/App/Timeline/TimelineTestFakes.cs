@@ -105,6 +105,11 @@ internal sealed class FakeApiClient : IGitHubApiClient
 {
     public List<string> MarkedReadThreads { get; } = new();
     public Func<string, Exception?>? MarkReadOverride { get; set; }
+    /// <summary>
+    /// Optional gate; when set, <see cref="MarkThreadReadAsync"/> awaits this task
+    /// before completing. Lets tests assert concurrency / coalescing behavior.
+    /// </summary>
+    public TaskCompletionSource? MarkReadGate { get; set; }
 
     public Task<UserValidationResult> ValidateAsync(string pat, CancellationToken ct = default)
         => Task.FromResult(new UserValidationResult(true, "octocat", null, null));
@@ -112,15 +117,18 @@ internal sealed class FakeApiClient : IGitHubApiClient
     public Task<NotificationsResponse> ListNotificationsAsync(string pat, NotificationsRequest request, CancellationToken ct = default)
         => Task.FromResult(new NotificationsResponse(Array.Empty<GitHubNotification>(), null, RateLimitInfo.Empty, false));
 
-    public Task MarkThreadReadAsync(string pat, string threadId, CancellationToken ct = default)
+    public async Task MarkThreadReadAsync(string pat, string threadId, CancellationToken ct = default)
     {
+        if (MarkReadGate is { } gate)
+        {
+            await gate.Task.ConfigureAwait(false);
+        }
         if (MarkReadOverride is { } o)
         {
             var ex = o(threadId);
             if (ex is not null) throw ex;
         }
         MarkedReadThreads.Add(threadId);
-        return Task.CompletedTask;
     }
 }
 
