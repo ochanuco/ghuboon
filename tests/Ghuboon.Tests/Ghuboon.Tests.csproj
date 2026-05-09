@@ -19,6 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\Ghuboon.App\Ghuboon.App.csproj" />
     <ProjectReference Include="..\..\src\Ghuboon.Core\Ghuboon.Core.csproj" />
     <ProjectReference Include="..\..\src\Ghuboon.Infrastructure\Ghuboon.Infrastructure.csproj" />
   </ItemGroup>
