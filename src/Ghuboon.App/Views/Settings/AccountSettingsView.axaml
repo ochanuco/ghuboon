@@ -1,0 +1,49 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Ghuboon.App.ViewModels.Settings"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="600" d:DesignHeight="240"
+             x:Class="Ghuboon.App.Views.Settings.AccountSettingsView"
+             x:DataType="vm:AccountSettingsViewModel">
+
+    <StackPanel Spacing="6">
+        <TextBlock Text="Account" FontWeight="SemiBold" FontSize="14" />
+
+        <StackPanel Orientation="Horizontal" Spacing="12" IsVisible="{Binding HasAccount}">
+            <TextBlock Text="Signed in as" Opacity="0.6" />
+            <TextBlock Text="{Binding CurrentLogin, StringFormat='@{0}'}" FontWeight="SemiBold" />
+            <TextBlock Text="{Binding CredentialKey, StringFormat='(key: {0})'}" Opacity="0.5" />
+        </StackPanel>
+
+        <TextBlock Text="No account configured."
+                   Opacity="0.6"
+                   IsVisible="{Binding !HasAccount}" />
+
+        <TextBox PlaceholderText="Personal Access Token"
+                 PasswordChar="•"
+                 Text="{Binding PatInput, Mode=TwoWay}" />
+
+        <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button Content="Validate token" Command="{Binding ValidateCommand}" />
+            <Button Content="Save" Command="{Binding SaveCommand}" />
+            <Button Content="Replace token" Command="{Binding SaveCommand}" />
+            <Button Content="Remove token"
+                    Command="{Binding RemoveCommand}"
+                    IsEnabled="{Binding HasAccount}" />
+        </StackPanel>
+
+        <TextBlock Text="{Binding ValidationMessage}"
+                   IsVisible="{Binding IsValidationValid}"
+                   Foreground="Green" />
+
+        <TextBlock Text="{Binding ValidationMessage}"
+                   IsVisible="{Binding IsValidationInvalid}"
+                   Foreground="#C62828" />
+
+        <TextBlock Text="The PAT requires the `notifications` scope. The token is sent to GitHub only for validation and is then stored in the macOS Keychain."
+                   Opacity="0.55"
+                   FontSize="11"
+                   TextWrapping="Wrap" />
+    </StackPanel>
+</UserControl>

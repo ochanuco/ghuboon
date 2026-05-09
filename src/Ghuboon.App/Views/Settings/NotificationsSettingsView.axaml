@@ -1,0 +1,23 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Ghuboon.App.ViewModels.Settings"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="600" d:DesignHeight="160"
+             x:Class="Ghuboon.App.Views.Settings.NotificationsSettingsView"
+             x:DataType="vm:NotificationsSettingsViewModel">
+
+    <StackPanel Spacing="6">
+        <TextBlock Text="Notifications" FontWeight="SemiBold" FontSize="14" />
+        <CheckBox Content="Enable OS notifications"
+                  IsChecked="{Binding OsNotificationsEnabled, Mode=TwoWay}" />
+        <TextBlock Text="High-priority reasons that produce OS notifications:" Opacity="0.65" />
+        <ItemsControl ItemsSource="{Binding HighPriorityReasons}">
+            <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding}" Margin="12,0,0,0" Opacity="0.8" />
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+    </StackPanel>
+</UserControl>
