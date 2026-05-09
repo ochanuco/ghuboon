@@ -1,0 +1,575 @@
+using System.Net.Http;
+using System.Text.Json;
+using Ghuboon.Core.Abstractions;
+using Ghuboon.Core.Domain;
+using Ghuboon.Infrastructure.GitHub;
+using Serilog;
+
+namespace Ghuboon.Infrastructure.Sync;
+
+/// <summary>
+/// Default <see cref="INotificationSyncService"/> implementation (Phase 7).
+/// <para>
+/// Coordinates: account lookup, PAT retrieval, ETag-conditional fetch, upsert into
+/// the local cache, repository upsert, sync-state bookkeeping, cache pruning
+/// (ADR-022, 30 days), and high-priority new-item eventing (ADR-021).
+/// </para>
+/// <para>
+/// Background loop fires every <see cref="DefaultPeriod"/> (5 minutes per ADR-020).
+/// Tests may override the period via the constructor for fast iteration.
+/// </para>
+/// </summary>
+public sealed class NotificationSyncService : INotificationSyncService, IAsyncDisposable, IDisposable
+{
+    /// <summary>Default 5-minute periodic sync interval (ADR-020).</summary>
+    public static readonly TimeSpan DefaultPeriod = TimeSpan.FromMinutes(5);
+
+    /// <summary>30-day cache retention (ADR-022).</summary>
+    public static readonly TimeSpan CacheRetention = TimeSpan.FromDays(30);
+
+    private static readonly HashSet<NotificationReason> HighPriorityReasons = new()
+    {
+        NotificationReason.Review,
+        NotificationReason.Mention,
+        NotificationReason.TeamMention,
+        NotificationReason.Assigned,
+    };
+
+    private static readonly JsonSerializerOptions RawJsonOptions = new()
+    {
+        WriteIndented = false,
+    };
+
+    private readonly ICredentialStore _credentialStore;
+    private readonly IAccountRepository _accountRepository;
+    private readonly IRepositoryRepository _repositoryRepository;
+    private readonly INotificationRepository _notificationRepository;
+    private readonly ISyncStateRepository _syncStateRepository;
+    private readonly IGitHubApiClient _apiClient;
+    private readonly IClock _clock;
+    private readonly ILogger? _logger;
+    private readonly string? _defaultAccountId;
+    private readonly TimeSpan _period;
+
+    private readonly object _lifecycleLock = new();
+    private CancellationTokenSource? _backgroundCts;
+    private Task? _backgroundTask;
+
+    public NotificationSyncService(
+        ICredentialStore credentialStore,
+        IAccountRepository accountRepository,
+        IRepositoryRepository repositoryRepository,
+        INotificationRepository notificationRepository,
+        ISyncStateRepository syncStateRepository,
+        IGitHubApiClient apiClient,
+        IClock clock,
+        ILogger? logger = null,
+        string? defaultAccountId = null,
+        TimeSpan? period = null)
+    {
+        ArgumentNullException.ThrowIfNull(credentialStore);
+        ArgumentNullException.ThrowIfNull(accountRepository);
+        ArgumentNullException.ThrowIfNull(repositoryRepository);
+        ArgumentNullException.ThrowIfNull(notificationRepository);
+        ArgumentNullException.ThrowIfNull(syncStateRepository);
+        ArgumentNullException.ThrowIfNull(apiClient);
+        ArgumentNullException.ThrowIfNull(clock);
+
+        _credentialStore = credentialStore;
+        _accountRepository = accountRepository;
+        _repositoryRepository = repositoryRepository;
+        _notificationRepository = notificationRepository;
+        _syncStateRepository = syncStateRepository;
+        _apiClient = apiClient;
+        _clock = clock;
+        _logger = logger?.ForContext<NotificationSyncService>();
+        _defaultAccountId = defaultAccountId;
+        _period = period ?? DefaultPeriod;
+    }
+
+    public event EventHandler<SyncProgressEvent>? Progress;
+    public event EventHandler<NewNotificationsEvent>? NewNotifications;
+
+    public bool IsRunning
+    {
+        get
+        {
+            lock (_lifecycleLock)
+            {
+                return _backgroundTask is { IsCompleted: false };
+            }
+        }
+    }
+
+    public async Task<SyncResult> SyncAsync(string accountId, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(accountId);
+
+        RaiseProgress(accountId, SyncStage.Starting, null);
+
+        // 1. Resolve account.
+        Account? account;
+        try
+        {
+            account = await _accountRepository.GetByIdAsync(accountId, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.Warning(ex, "Sync failed: account lookup error for {AccountId}", accountId);
+            var dbResult = new SyncResult(false, 0, 0, 0, ErrorCategory.Database, "Failed to load account from cache.", null);
+            RaiseProgress(accountId, SyncStage.Failed, dbResult);
+            return dbResult;
+        }
+
+        if (account is null)
+        {
+            var result = new SyncResult(false, 0, 0, 0, ErrorCategory.Auth, "Account not configured", null);
+            RaiseProgress(accountId, SyncStage.Failed, result);
+            return result;
+        }
+
+        // 2. Resolve PAT.
+        string? pat;
+        try
+        {
+            pat = await _credentialStore.GetAsync(account.CredentialKey, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.Warning(ex, "Sync failed: credential lookup error");
+            var credResult = new SyncResult(false, 0, 0, 0, ErrorCategory.Auth, "Failed to read credential store.", null);
+            RaiseProgress(accountId, SyncStage.Failed, credResult);
+            return credResult;
+        }
+
+        if (string.IsNullOrEmpty(pat))
+        {
+            var result = new SyncResult(false, 0, 0, 0, ErrorCategory.Auth, "No PAT stored for account", null);
+            RaiseProgress(accountId, SyncStage.Failed, result);
+            return result;
+        }
+
+        // 3. Load sync state (or empty).
+        SyncState state;
+        try
+        {
+            state = await _syncStateRepository.GetAsync(accountId, ct).ConfigureAwait(false)
+                    ?? SyncState.Empty(accountId);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.Warning(ex, "Sync failed: sync state lookup error");
+            var dbResult = new SyncResult(false, 0, 0, 0, ErrorCategory.Database, "Failed to load sync state.", null);
+            RaiseProgress(accountId, SyncStage.Failed, dbResult);
+            return dbResult;
+        }
+
+        var hadPriorEtag = !string.IsNullOrEmpty(state.NotificationsEtag);
+
+        // 4. Call GitHub API.
+        RaiseProgress(accountId, SyncStage.Fetching, null);
+
+        NotificationsResponse response;
+        try
+        {
+            response = await _apiClient.ListNotificationsAsync(
+                pat,
+                new NotificationsRequest(IfNoneMatch: state.NotificationsEtag, AccountId: accountId),
+                ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (GitHubApiException ex)
+        {
+            return await HandleApiFailureAsync(accountId, state, ex.Category, ex.Message, null, ct).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger?.Warning(ex, "Sync failed: network error");
+            return await HandleApiFailureAsync(accountId, state, ErrorCategory.Network, "Network error contacting GitHub.", null, ct).ConfigureAwait(false);
+        }
+        catch (TaskCanceledException ex)
+        {
+            _logger?.Warning(ex, "Sync failed: timeout");
+            return await HandleApiFailureAsync(accountId, state, ErrorCategory.Network, "Request to GitHub timed out.", null, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger?.Warning(ex, "Sync failed: unknown error");
+            return await HandleApiFailureAsync(accountId, state, ErrorCategory.Unknown, ex.Message, null, ct).ConfigureAwait(false);
+        }
+
+        var now = _clock.UtcNow;
+
+        // 5. 304 Not Modified.
+        if (response.NotModified)
+        {
+            try
+            {
+                await PersistSyncStateAsync(state with
+                {
+                    LastSyncAt = now,
+                    LastSuccessfulSyncAt = now,
+                    NotificationsEtag = response.Etag ?? state.NotificationsEtag,
+                    RateLimitRemaining = response.RateLimit.Remaining,
+                    RateLimitResetAt = response.RateLimit.ResetAt,
+                }, ct).ConfigureAwait(false);
+
+                RaiseProgress(accountId, SyncStage.Pruning, null);
+                await PruneAsync(now, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger?.Warning(ex, "Post-304 bookkeeping failed");
+                var dbResult = new SyncResult(false, 0, 0, 0, ErrorCategory.Database, ex.Message, response.RateLimit);
+                RaiseProgress(accountId, SyncStage.Failed, dbResult);
+                return dbResult;
+            }
+
+            var notModifiedResult = new SyncResult(true, 0, 0, 0, null, null, response.RateLimit);
+            RaiseProgress(accountId, SyncStage.Completed, notModifiedResult);
+            return notModifiedResult;
+        }
+
+        // 6. Persist notifications.
+        RaiseProgress(accountId, SyncStage.Persisting, null);
+
+        var newCount = 0;
+        var updatedCount = 0;
+        var highPriorityNew = new List<GitHubNotification>();
+        var seenRepoFullNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            foreach (var notification in response.Notifications)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                var existing = await _notificationRepository
+                    .GetByIdAsync(notification.Id, ct)
+                    .ConfigureAwait(false);
+                var isNew = existing is null;
+
+                // TODO: get true raw_json from API client; design constraint between
+                // Phase 6 and Phase 5+7. Synthesize a minimal payload for the MVP so
+                // the raw_json column is non-empty and roughly representative.
+                var rawJson = SynthesizeRawJson(notification);
+
+                await _notificationRepository
+                    .UpsertAsync(notification, rawJson, now, ct)
+                    .ConfigureAwait(false);
+
+                if (isNew)
+                {
+                    newCount++;
+                    if (HighPriorityReasons.Contains(notification.Reason))
+                    {
+                        highPriorityNew.Add(notification);
+                    }
+                }
+                else
+                {
+                    updatedCount++;
+                }
+
+                if (!string.IsNullOrEmpty(notification.RepositoryFullName) &&
+                    seenRepoFullNames.Add(notification.RepositoryFullName))
+                {
+                    await UpsertRepositoryAsync(accountId, notification.RepositoryFullName, ct).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.Warning(ex, "Persisting notifications failed");
+            var dbResult = new SyncResult(false, response.Notifications.Count, newCount, updatedCount, ErrorCategory.Database, ex.Message, response.RateLimit);
+            RaiseProgress(accountId, SyncStage.Failed, dbResult);
+            return dbResult;
+        }
+
+        // 7. Persist updated sync state.
+        try
+        {
+            await PersistSyncStateAsync(state with
+            {
+                LastSyncAt = now,
+                LastSuccessfulSyncAt = now,
+                NotificationsEtag = response.Etag ?? state.NotificationsEtag,
+                RateLimitRemaining = response.RateLimit.Remaining,
+                RateLimitResetAt = response.RateLimit.ResetAt,
+            }, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.Warning(ex, "Persisting sync state failed");
+            var dbResult = new SyncResult(false, response.Notifications.Count, newCount, updatedCount, ErrorCategory.Database, ex.Message, response.RateLimit);
+            RaiseProgress(accountId, SyncStage.Failed, dbResult);
+            return dbResult;
+        }
+
+        // 8. Prune old cached rows.
+        RaiseProgress(accountId, SyncStage.Pruning, null);
+        try
+        {
+            await PruneAsync(now, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Pruning failures are non-fatal: the sync itself succeeded.
+            _logger?.Warning(ex, "Cache prune failed");
+        }
+
+        var result2 = new SyncResult(
+            Success: true,
+            FetchedCount: response.Notifications.Count,
+            NewCount: newCount,
+            UpdatedCount: updatedCount,
+            Error: null,
+            Message: null,
+            RateLimit: response.RateLimit);
+
+        RaiseProgress(accountId, SyncStage.Completed, result2);
+
+        // 9. NewNotifications event — only when we already had a prior etag (ADR-021).
+        if (hadPriorEtag && highPriorityNew.Count > 0)
+        {
+            try
+            {
+                NewNotifications?.Invoke(this, new NewNotificationsEvent(accountId, highPriorityNew));
+            }
+            catch (Exception ex)
+            {
+                _logger?.Warning(ex, "NewNotifications subscriber threw");
+            }
+        }
+
+        return result2;
+    }
+
+    public void Start()
+    {
+        lock (_lifecycleLock)
+        {
+            if (_backgroundTask is { IsCompleted: false })
+            {
+                return;
+            }
+
+            _backgroundCts = new CancellationTokenSource();
+            var cts = _backgroundCts;
+            _backgroundTask = Task.Run(() => RunBackgroundLoopAsync(cts.Token), cts.Token);
+        }
+    }
+
+    public void Stop()
+    {
+        CancellationTokenSource? toCancel;
+        Task? toAwait;
+
+        lock (_lifecycleLock)
+        {
+            toCancel = _backgroundCts;
+            toAwait = _backgroundTask;
+            _backgroundCts = null;
+            _backgroundTask = null;
+        }
+
+        if (toCancel is null)
+        {
+            return;
+        }
+
+        try
+        {
+            toCancel.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Already disposed by a previous stop.
+        }
+
+        try
+        {
+            // Best-effort wait. Do not block forever in case the loop is mid-call.
+            toAwait?.Wait(TimeSpan.FromSeconds(5));
+        }
+        catch (AggregateException)
+        {
+            // PeriodicTimer cancellation surfaces as a TaskCanceledException; ignore.
+        }
+        finally
+        {
+            toCancel.Dispose();
+        }
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        Stop();
+        return ValueTask.CompletedTask;
+    }
+
+    public void Dispose()
+    {
+        Stop();
+    }
+
+    private async Task RunBackgroundLoopAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(_period);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+            {
+                var accountId = await ResolveLoopAccountIdAsync(ct).ConfigureAwait(false);
+                if (accountId is null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    await SyncAsync(accountId, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    _logger?.Warning(ex, "Background sync iteration failed");
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected on Stop().
+        }
+    }
+
+    private async Task<string?> ResolveLoopAccountIdAsync(CancellationToken ct)
+    {
+        if (!string.IsNullOrEmpty(_defaultAccountId))
+        {
+            return _defaultAccountId;
+        }
+
+        try
+        {
+            var accounts = await _accountRepository.ListAsync(ct).ConfigureAwait(false);
+            return accounts.Count == 0 ? null : accounts[0].Id;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.Warning(ex, "Could not resolve account for periodic sync");
+            return null;
+        }
+    }
+
+    private async Task<SyncResult> HandleApiFailureAsync(
+        string accountId,
+        SyncState state,
+        ErrorCategory category,
+        string message,
+        RateLimitInfo? rateLimit,
+        CancellationToken ct)
+    {
+        // Persist last-attempted-at without bumping last_successful_sync_at, so the
+        // status bar can surface "sync failed" but cached data remains intact.
+        var now = _clock.UtcNow;
+        try
+        {
+            await PersistSyncStateAsync(state with
+            {
+                LastSyncAt = now,
+                RateLimitRemaining = rateLimit?.Remaining ?? state.RateLimitRemaining,
+                RateLimitResetAt = rateLimit?.ResetAt ?? state.RateLimitResetAt,
+            }, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger?.Warning(ex, "Persisting failed-sync bookkeeping itself failed");
+        }
+
+        var result = new SyncResult(false, 0, 0, 0, category, message, rateLimit);
+        RaiseProgress(accountId, SyncStage.Failed, result);
+        return result;
+    }
+
+    private Task PersistSyncStateAsync(SyncState updated, CancellationToken ct) =>
+        _syncStateRepository.UpsertAsync(updated, ct);
+
+    private Task PruneAsync(DateTimeOffset now, CancellationToken ct) =>
+        _notificationRepository.DeleteOlderThanAsync(now - CacheRetention, ct);
+
+    private async Task UpsertRepositoryAsync(string accountId, string fullName, CancellationToken ct)
+    {
+        var (owner, name) = SplitFullName(fullName);
+        var existing = await _repositoryRepository
+            .GetByFullNameAsync(accountId, fullName, ct)
+            .ConfigureAwait(false);
+
+        if (existing is not null)
+        {
+            return;
+        }
+
+        var repoRef = new RepositoryRef(
+            Id: $"{accountId}:{fullName}",
+            AccountId: accountId,
+            FullName: fullName,
+            Owner: owner,
+            Name: name,
+            HtmlUrl: $"https://github.com/{fullName}");
+
+        await _repositoryRepository.UpsertAsync(repoRef, ct).ConfigureAwait(false);
+    }
+
+    private static (string Owner, string Name) SplitFullName(string fullName)
+    {
+        var slash = fullName.IndexOf('/');
+        if (slash <= 0 || slash >= fullName.Length - 1)
+        {
+            return (fullName, fullName);
+        }
+        return (fullName[..slash], fullName[(slash + 1)..]);
+    }
+
+    private static string SynthesizeRawJson(GitHubNotification notification)
+    {
+        // Minimal but representative payload. Acceptable for MVP because raw_json
+        // is reserved for future replay rather than runtime behavior.
+        var payload = new
+        {
+            id = notification.ThreadId,
+            reason = notification.Reason.ToString(),
+            unread = notification.Unread,
+            updated_at = notification.UpdatedAt.ToString("O"),
+            subject = new
+            {
+                title = notification.Subject.Title,
+                type = notification.Subject.Type,
+                url = notification.Subject.ApiUrl,
+            },
+            repository = new
+            {
+                full_name = notification.RepositoryFullName,
+            },
+        };
+        return JsonSerializer.Serialize(payload, RawJsonOptions);
+    }
+
+    private void RaiseProgress(string accountId, SyncStage stage, SyncResult? result)
+    {
+        try
+        {
+            Progress?.Invoke(this, new SyncProgressEvent(accountId, stage, result));
+        }
+        catch (Exception ex)
+        {
+            _logger?.Warning(ex, "Progress subscriber threw at stage {Stage}", stage);
+        }
+    }
+}
