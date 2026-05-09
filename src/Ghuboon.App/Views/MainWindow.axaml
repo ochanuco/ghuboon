@@ -15,11 +15,11 @@
         <vm:MainWindowViewModel/>
     </Design.DataContext>
 
-    <Grid RowDefinitions="Auto,Auto,*">
+    <Grid RowDefinitions="Auto,Auto,*,Auto">
 
         <!-- Top bar -->
         <Border Grid.Row="0" Padding="12,8" BorderThickness="0,0,0,1" BorderBrush="#33000000">
-            <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto">
+            <Grid ColumnDefinitions="Auto,Auto,Auto,Auto,*,Auto">
                 <TextBlock Grid.Column="0"
                            Text="{Binding Title}"
                            FontSize="16"
@@ -29,7 +29,8 @@
                 <Button Grid.Column="1"
                         Margin="12,0,0,0"
                         Content="Sync"
-                        Command="{Binding SyncCommand}" />
+                        Command="{Binding SyncCommand}"
+                        IsEnabled="{Binding !IsSyncing}" />
 
                 <TextBlock Grid.Column="2"
                            Margin="12,0,0,0"
@@ -37,12 +38,26 @@
                            Opacity="0.75"
                            Text="{Binding UnreadCount, StringFormat='Unread: {0}'}" />
 
-                <TextBox Grid.Column="3"
+                <ComboBox Grid.Column="3"
+                          Margin="12,0,0,0"
+                          PlaceholderText="All repos"
+                          ItemsSource="{Binding Repositories}"
+                          SelectedValue="{Binding SelectedRepositoryFullName}"
+                          SelectedValueBinding="{Binding FullName}"
+                          MinWidth="180">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate>
+                            <TextBlock Text="{Binding FullName}" />
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
+
+                <TextBox Grid.Column="4"
                          Margin="12,0"
                          PlaceholderText="Search"
                          Text="{Binding SearchText}" />
 
-                <Button Grid.Column="4"
+                <Button Grid.Column="5"
                         Content="Settings"
                         Command="{Binding OpenSettingsCommand}" />
             </Grid>
@@ -75,5 +90,66 @@
             <ContentControl IsVisible="{Binding IsSettingsVisible}"
                             Content="{Binding Settings}" />
         </Panel>
+
+        <!-- Status bar (Phase 14) -->
+        <Border Grid.Row="3"
+                Padding="10,4"
+                BorderThickness="0,1,0,0"
+                BorderBrush="#22000000"
+                Background="#06000000">
+            <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto,Auto">
+                <TextBlock Grid.Column="0"
+                           Text="{Binding StatusText}"
+                           FontSize="11"
+                           VerticalAlignment="Center"
+                           Opacity="0.8"
+                           IsVisible="{Binding StatusText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+
+                <TextBlock Grid.Column="1"
+                           Text="{Binding LastSyncText}"
+                           FontSize="11"
+                           Margin="12,0,0,0"
+                           VerticalAlignment="Center"
+                           Opacity="0.7"
+                           IsVisible="{Binding LastSyncText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+
+                <TextBlock Grid.Column="2"
+                           Text="{Binding UnreadCount, StringFormat='{}{0} unread'}"
+                           FontSize="11"
+                           Margin="12,0,0,0"
+                           VerticalAlignment="Center"
+                           Opacity="0.7" />
+
+                <TextBlock Grid.Column="4"
+                           Text="{Binding RateLimitText}"
+                           FontSize="11"
+                           VerticalAlignment="Center"
+                           Opacity="0.7"
+                           IsVisible="{Binding RateLimitText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+
+                <TextBlock Grid.Column="5"
+                           Text="{Binding ErrorMessage}"
+                           FontSize="11"
+                           Margin="12,0,0,0"
+                           VerticalAlignment="Center"
+                           Foreground="#CF222E"
+                           IsVisible="{Binding ErrorMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+
+                <StackPanel Grid.Column="6"
+                            Orientation="Horizontal"
+                            Spacing="4"
+                            Margin="8,0,0,0"
+                            IsVisible="{Binding ErrorMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                    <Button Content="Retry"
+                            Padding="6,1"
+                            FontSize="11"
+                            Command="{Binding RetrySyncCommand}" />
+                    <Button Content="Dismiss"
+                            Padding="6,1"
+                            FontSize="11"
+                            Command="{Binding DismissErrorCommand}" />
+                </StackPanel>
+            </Grid>
+        </Border>
     </Grid>
 </Window>

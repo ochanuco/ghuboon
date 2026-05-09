@@ -1,0 +1,202 @@
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using Ghuboon.App.Services;
+using Ghuboon.App.ViewModels;
+using Ghuboon.Core.Abstractions;
+using Ghuboon.Core.Domain;
+
+namespace Ghuboon.Tests.App.Timeline;
+
+/// <summary>
+/// In-memory <see cref="INotificationRepository"/> for the App-layer tests.
+/// Mirrors the Sync tests' fixture but lives here so the App tests don't have
+/// to depend on internal Sync types.
+/// </summary>
+internal sealed class FakeNotificationRepository : INotificationRepository
+{
+    public List<GitHubNotification> Notifications { get; } = new();
+    public int UpsertCallCount { get; private set; }
+
+    public Task UpsertAsync(GitHubNotification notification, string rawJson, DateTimeOffset syncedAt, CancellationToken ct = default)
+    {
+        UpsertCallCount++;
+        var idx = Notifications.FindIndex(n => n.Id == notification.Id);
+        if (idx >= 0)
+        {
+            Notifications[idx] = notification;
+        }
+        else
+        {
+            Notifications.Add(notification);
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task<GitHubNotification?> GetByIdAsync(string id, CancellationToken ct = default)
+    {
+        return Task.FromResult(Notifications.Find(n => n.Id == id));
+    }
+
+    public Task<IReadOnlyList<GitHubNotification>> ListByAccountAsync(string accountId, CancellationToken ct = default)
+    {
+        IReadOnlyList<GitHubNotification> list = Notifications
+            .FindAll(n => n.AccountId == accountId)
+            .ConvertAll(n => n);
+        return Task.FromResult(list);
+    }
+
+    public Task<int> DeleteOlderThanAsync(DateTimeOffset cutoff, CancellationToken ct = default)
+    {
+        return Task.FromResult(0);
+    }
+}
+
+internal sealed class FakeRepositoryRepository : IRepositoryRepository
+{
+    public List<RepositoryRef> Repositories { get; } = new();
+
+    public Task UpsertAsync(RepositoryRef repository, CancellationToken ct = default)
+    {
+        Repositories.Add(repository);
+        return Task.CompletedTask;
+    }
+
+    public Task<RepositoryRef?> GetByFullNameAsync(string accountId, string fullName, CancellationToken ct = default)
+    {
+        return Task.FromResult(Repositories.Find(r => r.AccountId == accountId && r.FullName == fullName));
+    }
+
+    public Task<IReadOnlyList<RepositoryRef>> ListByAccountAsync(string accountId, CancellationToken ct = default)
+    {
+        IReadOnlyList<RepositoryRef> list = Repositories
+            .FindAll(r => r.AccountId == accountId)
+            .ConvertAll(r => r);
+        return Task.FromResult(list);
+    }
+}
+
+internal sealed class FakeAccountRepository : IAccountRepository
+{
+    public List<Account> Accounts { get; } = new();
+
+    public Task UpsertAsync(Account account, CancellationToken ct = default)
+    {
+        var idx = Accounts.FindIndex(a => a.Id == account.Id);
+        if (idx >= 0) Accounts[idx] = account;
+        else Accounts.Add(account);
+        return Task.CompletedTask;
+    }
+
+    public Task<Account?> GetByIdAsync(string id, CancellationToken ct = default)
+    {
+        return Task.FromResult(Accounts.Find(a => a.Id == id));
+    }
+
+    public Task<IReadOnlyList<Account>> ListAsync(CancellationToken ct = default)
+    {
+        IReadOnlyList<Account> list = Accounts.ConvertAll(a => a);
+        return Task.FromResult(list);
+    }
+}
+
+internal sealed class FakeApiClient : IGitHubApiClient
+{
+    public List<string> MarkedReadThreads { get; } = new();
+    public Func<string, Exception?>? MarkReadOverride { get; set; }
+
+    public Task<UserValidationResult> ValidateAsync(string pat, CancellationToken ct = default)
+        => Task.FromResult(new UserValidationResult(true, "octocat", null, null));
+
+    public Task<NotificationsResponse> ListNotificationsAsync(string pat, NotificationsRequest request, CancellationToken ct = default)
+        => Task.FromResult(new NotificationsResponse(Array.Empty<GitHubNotification>(), null, RateLimitInfo.Empty, false));
+
+    public Task MarkThreadReadAsync(string pat, string threadId, CancellationToken ct = default)
+    {
+        if (MarkReadOverride is { } o)
+        {
+            var ex = o(threadId);
+            if (ex is not null) throw ex;
+        }
+        MarkedReadThreads.Add(threadId);
+        return Task.CompletedTask;
+    }
+}
+
+internal sealed class FakeBrowser : IBrowserService
+{
+    public List<string> OpenedUrls { get; } = new();
+    public void OpenUrl(string url) => OpenedUrls.Add(url);
+}
+
+internal sealed class FakeClipboard : IClipboardService
+{
+    public List<string> Texts { get; } = new();
+    public Task SetTextAsync(string text)
+    {
+        Texts.Add(text);
+        return Task.CompletedTask;
+    }
+}
+
+internal sealed class FakeClock : IClock
+{
+    public DateTimeOffset UtcNow { get; set; } = new(2026, 5, 9, 12, 0, 0, TimeSpan.Zero);
+    public void Advance(TimeSpan d) => UtcNow += d;
+}
+
+internal sealed class FakeSyncService : INotificationSyncService
+{
+    public bool IsRunning { get; private set; }
+    public List<string> SyncCalls { get; } = new();
+    public Func<string, SyncResult>? Result { get; set; }
+
+    public event EventHandler<SyncProgressEvent>? Progress;
+    public event EventHandler<NewNotificationsEvent>? NewNotifications;
+
+    public Task<SyncResult> SyncAsync(string accountId, CancellationToken ct = default)
+    {
+        SyncCalls.Add(accountId);
+        Progress?.Invoke(this, new SyncProgressEvent(accountId, SyncStage.Starting, null));
+        var r = Result?.Invoke(accountId)
+                ?? new SyncResult(true, 0, 0, 0, null, null, RateLimitInfo.Empty);
+        var stage = r.Success ? SyncStage.Completed : SyncStage.Failed;
+        Progress?.Invoke(this, new SyncProgressEvent(accountId, stage, r));
+        return Task.FromResult(r);
+    }
+
+    public void RaiseProgress(SyncProgressEvent ev) => Progress?.Invoke(this, ev);
+
+    public void RaiseNewNotifications(NewNotificationsEvent ev) => NewNotifications?.Invoke(this, ev);
+
+    public void Start() => IsRunning = true;
+    public void Stop() => IsRunning = false;
+}
+
+internal static class TimelineTestData
+{
+    public static GitHubNotification Build(
+        string id,
+        string accountId,
+        string repo,
+        string title,
+        NotificationReason reason,
+        bool unread,
+        DateTimeOffset updatedAt,
+        string subjectType = "PullRequest",
+        string? webUrl = null,
+        string? threadId = null)
+    {
+        return new GitHubNotification(
+            id,
+            accountId,
+            threadId ?? id,
+            repo,
+            new NotificationSubject(subjectType, title, null, webUrl),
+            reason,
+            unread,
+            updatedAt,
+            null);
+    }
+}
