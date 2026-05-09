@@ -1,9 +1,10 @@
 <Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:Ghuboon.App.ViewModels"
+        xmlns:views="using:Ghuboon.App.Views"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+        mc:Ignorable="d" d:DesignWidth="900" d:DesignHeight="600"
         x:Class="Ghuboon.App.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Icon="/Assets/avalonia-logo.ico"
@@ -11,11 +12,68 @@
         Width="900" Height="600">
 
     <Design.DataContext>
-        <!-- This only sets the DataContext for the previewer in an IDE,
-             to set the actual DataContext for runtime, set the DataContext property in code (look at App.axaml.cs) -->
         <vm:MainWindowViewModel/>
     </Design.DataContext>
 
-    <TextBlock Text="{Binding Greeting}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    <Grid RowDefinitions="Auto,Auto,*">
 
+        <!-- Top bar -->
+        <Border Grid.Row="0" Padding="12,8" BorderThickness="0,0,0,1" BorderBrush="#33000000">
+            <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto">
+                <TextBlock Grid.Column="0"
+                           Text="{Binding Title}"
+                           FontSize="16"
+                           FontWeight="SemiBold"
+                           VerticalAlignment="Center" />
+
+                <Button Grid.Column="1"
+                        Margin="12,0,0,0"
+                        Content="Sync"
+                        Command="{Binding SyncCommand}" />
+
+                <TextBlock Grid.Column="2"
+                           Margin="12,0,0,0"
+                           VerticalAlignment="Center"
+                           Opacity="0.75"
+                           Text="{Binding UnreadCount, StringFormat='Unread: {0}'}" />
+
+                <TextBox Grid.Column="3"
+                         Margin="12,0"
+                         PlaceholderText="Search"
+                         Text="{Binding SearchText}" />
+
+                <Button Grid.Column="4"
+                        Content="Settings"
+                        Command="{Binding OpenSettingsCommand}" />
+            </Grid>
+        </Border>
+
+        <!-- Tabs -->
+        <ListBox Grid.Row="1"
+                 ItemsSource="{Binding Tabs}"
+                 SelectedItem="{Binding SelectedTab}"
+                 Padding="8,4"
+                 BorderThickness="0,0,0,1"
+                 BorderBrush="#22000000"
+                 Background="Transparent">
+            <ListBox.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <StackPanel Orientation="Horizontal" Spacing="4" />
+                </ItemsPanelTemplate>
+            </ListBox.ItemsPanel>
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding}" Padding="10,4" />
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+
+        <!-- Body: timeline or settings -->
+        <Panel Grid.Row="2">
+            <ContentControl IsVisible="{Binding !IsSettingsVisible}"
+                            Content="{Binding Timeline}" />
+            <ContentControl IsVisible="{Binding IsSettingsVisible}"
+                            Content="{Binding Settings}" />
+        </Panel>
+    </Grid>
 </Window>

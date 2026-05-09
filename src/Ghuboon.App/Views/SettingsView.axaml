@@ -1,0 +1,35 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Ghuboon.App.ViewModels"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="600" d:DesignHeight="400"
+             x:Class="Ghuboon.App.Views.SettingsView"
+             x:DataType="vm:SettingsViewModel">
+
+    <Design.DataContext>
+        <vm:SettingsViewModel/>
+    </Design.DataContext>
+
+    <ScrollViewer>
+        <StackPanel Margin="16" Spacing="12">
+            <TextBlock Text="Settings" FontSize="18" FontWeight="SemiBold" />
+
+            <TextBlock Text="Account" FontWeight="SemiBold" Margin="0,8,0,0" />
+            <TextBox PlaceholderText="Personal Access Token (placeholder)"
+                     PasswordChar="*"
+                     Text="{Binding PatPlaceholder}" />
+            <TextBlock Text="Token storage will use the OS credential store (Phase 3)."
+                       Opacity="0.6" FontSize="11" />
+
+            <TextBlock Text="Sync" FontWeight="SemiBold" Margin="0,8,0,0" />
+            <TextBlock Text="{Binding SyncIntervalDisplay}" Opacity="0.8" />
+
+            <TextBlock Text="Notifications" FontWeight="SemiBold" Margin="0,8,0,0" />
+            <CheckBox Content="Enable OS notifications" IsChecked="{Binding OsNotificationsEnabled}" />
+
+            <TextBlock Text="Cache" FontWeight="SemiBold" Margin="0,8,0,0" />
+            <TextBlock Text="{Binding CacheRetentionDisplay, StringFormat='Retention: {0}'}" Opacity="0.8" />
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>
