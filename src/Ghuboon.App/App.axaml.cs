@@ -1,9 +1,7 @@
 using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
-using Avalonia.Data.Core;
-using Avalonia.Data.Core.Plugins;
-using System.Linq;
 using Avalonia.Markup.Xaml;
+using Ghuboon.App.Services;
 using Ghuboon.App.ViewModels;
 using Ghuboon.App.Views;
 
@@ -20,9 +18,12 @@ public partial class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            IAppSettingsService appSettings = new StubAppSettingsService();
+            ITimelineService timeline = new StubTimelineService();
+
             desktop.MainWindow = new MainWindow
             {
-                DataContext = new MainWindowViewModel(),
+                DataContext = new MainWindowViewModel(appSettings, timeline),
             };
         }
 
