@@ -1,0 +1,70 @@
+# Build outputs
+bin/
+obj/
+out/
+publish/
+*.binlog
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userprefs
+*.swp
+*~
+
+# Rider
+_ReSharper.Caches/
+*.DotSettings.user
+
+# Test results
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
+*.trx
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# .NET tools
+.dotnet/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Avalonia / Designer
+*.designer.cs.bak
+
+# SQLite local databases (test artifacts)
+*.sqlite
+*.sqlite-journal
+*.db
+*.db-journal
+
+# Logs
+*.log
+logs/
+
+# Local workspace (per global convention)
+.local/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Direnv
+.envrc.cache

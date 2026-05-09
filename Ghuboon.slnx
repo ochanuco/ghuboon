@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Ghuboon.App/Ghuboon.App.csproj" />
+    <Project Path="src/Ghuboon.Core/Ghuboon.Core.csproj" />
+    <Project Path="src/Ghuboon.Infrastructure/Ghuboon.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Ghuboon.Tests/Ghuboon.Tests.csproj" />
+  </Folder>
+</Solution>
