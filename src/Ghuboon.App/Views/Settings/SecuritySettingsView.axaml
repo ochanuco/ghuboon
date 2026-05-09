@@ -1,0 +1,15 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Ghuboon.App.ViewModels.Settings"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="600" d:DesignHeight="120"
+             x:Class="Ghuboon.App.Views.Settings.SecuritySettingsView"
+             x:DataType="vm:SecuritySettingsViewModel">
+
+    <StackPanel Spacing="6">
+        <TextBlock Text="Security" FontWeight="SemiBold" FontSize="14" />
+        <TextBlock Text="{Binding CredentialStorageDescription}" TextWrapping="Wrap" Opacity="0.85" />
+        <TextBlock Text="{Binding EncryptedCacheDescription}" TextWrapping="Wrap" Opacity="0.85" />
+    </StackPanel>
+</UserControl>

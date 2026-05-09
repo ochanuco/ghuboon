@@ -1,9 +1,10 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:Ghuboon.App.ViewModels"
+             xmlns:settings="using:Ghuboon.App.Views.Settings"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-             mc:Ignorable="d" d:DesignWidth="600" d:DesignHeight="400"
+             mc:Ignorable="d" d:DesignWidth="640" d:DesignHeight="600"
              x:Class="Ghuboon.App.Views.SettingsView"
              x:DataType="vm:SettingsViewModel">
 
@@ -11,25 +12,43 @@
         <vm:SettingsViewModel/>
     </Design.DataContext>
 
+    <UserControl.Styles>
+        <Style Selector="Border.section">
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderBrush" Value="#22000000" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="16" />
+            <Setter Property="Background" Value="#06000000" />
+        </Style>
+    </UserControl.Styles>
+
     <ScrollViewer>
-        <StackPanel Margin="16" Spacing="12">
-            <TextBlock Text="Settings" FontSize="18" FontWeight="SemiBold" />
+        <StackPanel Margin="16" Spacing="14">
+            <TextBlock Text="Settings" FontSize="20" FontWeight="SemiBold" />
 
-            <TextBlock Text="Account" FontWeight="SemiBold" Margin="0,8,0,0" />
-            <TextBox PlaceholderText="Personal Access Token (placeholder)"
-                     PasswordChar="*"
-                     Text="{Binding PatPlaceholder}" />
-            <TextBlock Text="Token storage will use the OS credential store (Phase 3)."
-                       Opacity="0.6" FontSize="11" />
+            <Border Classes="section">
+                <settings:AccountSettingsView DataContext="{Binding Account}" />
+            </Border>
 
-            <TextBlock Text="Sync" FontWeight="SemiBold" Margin="0,8,0,0" />
-            <TextBlock Text="{Binding SyncIntervalDisplay}" Opacity="0.8" />
+            <Border Classes="section">
+                <settings:SyncSettingsView DataContext="{Binding Sync}" />
+            </Border>
 
-            <TextBlock Text="Notifications" FontWeight="SemiBold" Margin="0,8,0,0" />
-            <CheckBox Content="Enable OS notifications" IsChecked="{Binding OsNotificationsEnabled}" />
+            <Border Classes="section">
+                <settings:NotificationsSettingsView DataContext="{Binding Notifications}" />
+            </Border>
 
-            <TextBlock Text="Cache" FontWeight="SemiBold" Margin="0,8,0,0" />
-            <TextBlock Text="{Binding CacheRetentionDisplay, StringFormat='Retention: {0}'}" Opacity="0.8" />
+            <Border Classes="section">
+                <settings:CacheSettingsView DataContext="{Binding Cache}" />
+            </Border>
+
+            <Border Classes="section">
+                <settings:SecuritySettingsView DataContext="{Binding Security}" />
+            </Border>
+
+            <Border Classes="section">
+                <settings:AboutSettingsView DataContext="{Binding About}" />
+            </Border>
         </StackPanel>
     </ScrollViewer>
 </UserControl>
