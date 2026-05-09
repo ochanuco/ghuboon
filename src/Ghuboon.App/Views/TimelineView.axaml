@@ -11,54 +11,94 @@
         <vm:TimelineViewModel/>
     </Design.DataContext>
 
-    <Grid RowDefinitions="Auto,*">
-        <TextBlock Grid.Row="0"
-                   Margin="12,8"
-                   FontSize="12"
-                   Opacity="0.7"
-                   Text="{Binding CurrentFilter, StringFormat='Filter: {0}'}" />
+    <Grid RowDefinitions="*">
 
-        <ListBox Grid.Row="1"
+        <!-- Empty state -->
+        <TextBlock Grid.Row="0"
+                   Text="No notifications match the current filter."
+                   FontSize="13"
+                   Opacity="0.6"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Center"
+                   IsVisible="{Binding IsEmpty}" />
+
+        <ListBox Grid.Row="0"
+                 x:Name="ItemsList"
                  ItemsSource="{Binding Items}"
                  BorderThickness="0"
-                 Background="Transparent">
+                 Background="Transparent"
+                 SelectionChanged="OnSelectionChanged"
+                 IsVisible="{Binding !IsEmpty}">
             <ListBox.ItemTemplate>
                 <DataTemplate DataType="vm:TimelineItemViewModel">
-                    <Grid ColumnDefinitions="Auto,Auto,*,Auto" RowDefinitions="Auto,Auto" Margin="4,6">
-                        <Ellipse Grid.Column="0" Grid.Row="0" Grid.RowSpan="2"
-                                 Width="8" Height="8"
-                                 Margin="0,0,8,0"
-                                 VerticalAlignment="Center"
-                                 Fill="DodgerBlue"
-                                 IsVisible="{Binding Unread}" />
+                    <Border Padding="0"
+                            Background="Transparent"
+                            BorderThickness="0,0,0,1"
+                            BorderBrush="#11000000">
+                        <Grid RowDefinitions="Auto,Auto" Margin="8,8,8,8">
+                            <!-- Row 1: unread dot + reason badge + repo + relative time -->
+                            <Grid Grid.Row="0"
+                                  ColumnDefinitions="Auto,Auto,*,Auto"
+                                  VerticalAlignment="Center">
+                                <Ellipse Grid.Column="0"
+                                         Width="8" Height="8"
+                                         Margin="0,0,8,0"
+                                         VerticalAlignment="Center"
+                                         Fill="DodgerBlue"
+                                         IsVisible="{Binding Unread}" />
 
-                        <Border Grid.Column="1" Grid.Row="0"
-                                Margin="0,0,8,0"
-                                Padding="6,2"
-                                CornerRadius="3"
-                                Background="#1F6FEB">
-                            <TextBlock Text="{Binding Reason}"
-                                       Foreground="White"
-                                       FontSize="11" />
-                        </Border>
+                                <Border Grid.Column="1"
+                                        Margin="0,0,8,0"
+                                        Padding="6,1"
+                                        CornerRadius="3"
+                                        Background="{Binding ReasonBadgeColor}">
+                                    <TextBlock Text="{Binding ReasonBadgeText}"
+                                               Foreground="White"
+                                               FontSize="10"
+                                               FontWeight="SemiBold" />
+                                </Border>
 
-                        <TextBlock Grid.Column="2" Grid.Row="0"
-                                   Text="{Binding RepositoryFullName}"
-                                   FontWeight="SemiBold"
-                                   TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Column="2"
+                                           Text="{Binding RepositoryFullName}"
+                                           FontWeight="SemiBold"
+                                           TextTrimming="CharacterEllipsis" />
 
-                        <TextBlock Grid.Column="3" Grid.Row="0"
-                                   Text="{Binding UpdatedRelative}"
-                                   Opacity="0.6"
-                                   FontSize="11"
-                                   Margin="8,0,0,0" />
+                                <TextBlock Grid.Column="3"
+                                           Text="{Binding RelativeTime}"
+                                           Opacity="0.6"
+                                           FontSize="11"
+                                           Margin="8,0,0,0" />
+                            </Grid>
 
-                        <TextBlock Grid.Column="1" Grid.ColumnSpan="3" Grid.Row="1"
-                                   Text="{Binding Title}"
-                                   Margin="0,2,0,0"
-                                   Opacity="0.85"
-                                   TextTrimming="CharacterEllipsis" />
-                    </Grid>
+                            <!-- Row 2: title + (when expanded) actions / flash -->
+                            <StackPanel Grid.Row="1" Spacing="4" Margin="16,2,0,0">
+                                <TextBlock Text="{Binding Title}"
+                                           Opacity="0.85"
+                                           TextTrimming="CharacterEllipsis"
+                                           Cursor="Hand"
+                                           DoubleTapped="OnTitleDoubleTapped" />
+
+                                <TextBlock Text="{Binding FlashMessage}"
+                                           FontSize="11"
+                                           Opacity="0.7"
+                                           IsVisible="{Binding FlashMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+
+                                <StackPanel Orientation="Horizontal"
+                                            Spacing="6"
+                                            IsVisible="{Binding IsExpanded}">
+                                    <Button Content="Open in GitHub"
+                                            Command="{Binding OpenInGitHubCommand}"
+                                            Padding="8,3" />
+                                    <Button Content="Mark as read"
+                                            Command="{Binding MarkAsReadCommand}"
+                                            Padding="8,3" />
+                                    <Button Content="Copy URL"
+                                            Command="{Binding CopyUrlCommand}"
+                                            Padding="8,3" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
                 </DataTemplate>
             </ListBox.ItemTemplate>
         </ListBox>

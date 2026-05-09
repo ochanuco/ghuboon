@@ -42,7 +42,7 @@ public class MainWindowViewModelTests
 
         Assert.Contains(nameof(MainWindowViewModel.SelectedTab), changes);
         Assert.Equal(MainWindowViewModel.TabReview, vm.SelectedTab);
-        Assert.Equal(MainWindowViewModel.TabReview, vm.Timeline.CurrentFilter);
+        Assert.Equal("Review", vm.Timeline.CurrentFilter);
     }
 
     [Fact]

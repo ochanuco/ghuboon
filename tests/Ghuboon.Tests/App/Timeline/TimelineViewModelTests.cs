@@ -1,0 +1,163 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Ghuboon.App.Services;
+using Ghuboon.App.ViewModels;
+using Ghuboon.Core.Domain;
+
+namespace Ghuboon.Tests.App.Timeline;
+
+public class TimelineViewModelTests
+{
+    [Fact]
+    public async Task Load_AppliesTabFilter_OnlyMentionsShown()
+    {
+        var fake = new FakeTimelineService();
+        fake.AddNotification(NotificationReason.Mention, "octocat/x", "mention 1");
+        fake.AddNotification(NotificationReason.TeamMention, "octocat/x", "team mention");
+        fake.AddNotification(NotificationReason.Watching, "octocat/x", "watching");
+
+        var vm = new TimelineViewModel(fake);
+        vm.ApplyFilter(new TimelineFilter(TimelineTab.Mention, null, null));
+        await vm.ReloadAsync();
+
+        Assert.Equal(2, vm.Items.Count);
+        Assert.All(vm.Items, i => Assert.Contains(i.Reason, new[] { NotificationReason.Mention, NotificationReason.TeamMention }));
+    }
+
+    [Fact]
+    public async Task Load_AppliesRepoFilter()
+    {
+        var fake = new FakeTimelineService();
+        fake.AddNotification(NotificationReason.Mention, "a/r", "a-row");
+        fake.AddNotification(NotificationReason.Mention, "b/r", "b-row");
+
+        var vm = new TimelineViewModel(fake);
+        vm.ApplyFilter(new TimelineFilter(TimelineTab.All, "a/r", null));
+        await vm.ReloadAsync();
+
+        Assert.Single(vm.Items);
+        Assert.Equal("a/r", vm.Items[0].RepositoryFullName);
+    }
+
+    [Fact]
+    public async Task Load_AppliesSearch_CaseInsensitive()
+    {
+        var fake = new FakeTimelineService();
+        fake.AddNotification(NotificationReason.Mention, "octocat/r", "Hello world");
+        fake.AddNotification(NotificationReason.Mention, "octocat/r", "Goodbye world");
+
+        var vm = new TimelineViewModel(fake);
+        vm.ApplyFilter(new TimelineFilter(TimelineTab.All, null, "HELLO"));
+        await vm.ReloadAsync();
+
+        Assert.Single(vm.Items);
+        Assert.Equal("Hello world", vm.Items[0].Title);
+    }
+
+    [Fact]
+    public async Task Load_OrdersByUpdatedAtDesc()
+    {
+        var fake = new FakeTimelineService();
+        var t0 = new DateTimeOffset(2026, 5, 9, 12, 0, 0, TimeSpan.Zero);
+        fake.AddNotification(NotificationReason.Mention, "a/r", "older", updatedAt: t0.AddHours(-2));
+        fake.AddNotification(NotificationReason.Mention, "a/r", "newer", updatedAt: t0);
+        fake.AddNotification(NotificationReason.Mention, "a/r", "middle", updatedAt: t0.AddHours(-1));
+
+        var vm = new TimelineViewModel(fake);
+        await vm.ReloadAsync();
+
+        Assert.Equal(new[] { "newer", "middle", "older" }, new[] { vm.Items[0].Title, vm.Items[1].Title, vm.Items[2].Title });
+    }
+
+    [Fact]
+    public async Task EmptyResult_SetsIsEmpty()
+    {
+        var fake = new FakeTimelineService();
+        var vm = new TimelineViewModel(fake);
+        await vm.ReloadAsync();
+
+        Assert.True(vm.IsEmpty);
+        Assert.Empty(vm.Items);
+    }
+
+    [Fact]
+    public async Task UnreadCount_TracksItemReadState()
+    {
+        var t0 = new DateTimeOffset(2026, 5, 9, 12, 0, 0, TimeSpan.Zero);
+        var fake = new FakeTimelineService();
+        fake.AddNotification(NotificationReason.Mention, "a/r", "u1", unread: true, updatedAt: t0);
+        fake.AddNotification(NotificationReason.Mention, "a/r", "u2", unread: true, updatedAt: t0.AddMinutes(-1));
+        fake.AddNotification(NotificationReason.Mention, "a/r", "r1", unread: false, updatedAt: t0.AddMinutes(-2));
+
+        var vm = new TimelineViewModel(fake);
+        await vm.ReloadAsync();
+
+        Assert.Equal(2, vm.UnreadCount);
+
+        // Find the first unread row and mark it read; aggregate must tick down.
+        var firstUnread = vm.Items.First(i => i.Unread);
+        firstUnread.Unread = false;
+        Assert.Equal(1, vm.UnreadCount);
+    }
+
+    /// <summary>
+    /// Lightweight test-side <see cref="ITimelineService"/> that maps a list of
+    /// <see cref="GitHubNotification"/> through the same filter/sort logic the
+    /// production service uses. Removes the dependency on the SQLite stack while
+    /// still exercising the filter pipeline.
+    /// </summary>
+    private sealed class FakeTimelineService : ITimelineService
+    {
+        public List<GitHubNotification> Notifications { get; } = new();
+
+        public void AddNotification(
+            NotificationReason reason,
+            string repo,
+            string title,
+            bool unread = true,
+            DateTimeOffset? updatedAt = null,
+            string subjectType = "PullRequest")
+        {
+            Notifications.Add(TimelineTestData.Build(
+                Guid.NewGuid().ToString(),
+                "primary",
+                repo,
+                title,
+                reason,
+                unread,
+                updatedAt ?? DateTimeOffset.UtcNow,
+                subjectType));
+        }
+
+        public Task<IReadOnlyList<TimelineItemViewModel>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
+        {
+            IEnumerable<GitHubNotification> q = Notifications;
+            q = q.Where(n => DbBackedTimelineService.MatchesTab(n.Reason, filter.Tab));
+
+            if (!string.IsNullOrEmpty(filter.RepositoryFullName))
+            {
+                q = q.Where(n => string.Equals(n.RepositoryFullName, filter.RepositoryFullName, StringComparison.OrdinalIgnoreCase));
+            }
+            if (!string.IsNullOrWhiteSpace(filter.SearchText))
+            {
+                var needle = filter.SearchText.Trim();
+                q = q.Where(n =>
+                    n.RepositoryFullName.Contains(needle, StringComparison.OrdinalIgnoreCase)
+                    || n.Subject.Title.Contains(needle, StringComparison.OrdinalIgnoreCase)
+                    || n.Reason.ToString().Contains(needle, StringComparison.OrdinalIgnoreCase)
+                    || (n.Subject.Type ?? string.Empty).Contains(needle, StringComparison.OrdinalIgnoreCase));
+            }
+            var ordered = q.OrderByDescending(n => n.UpdatedAt).ToList();
+            IReadOnlyList<TimelineItemViewModel> mapped = ordered.Select(n => new TimelineItemViewModel(n, TimelineItemContext.Empty)).ToList();
+            return Task.FromResult(mapped);
+        }
+
+        public Task<IReadOnlyList<RepositoryRef>> ListRepositoriesAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<RepositoryRef>>(Array.Empty<RepositoryRef>());
+
+        public IReadOnlyList<TimelineItemViewModel> GetPlaceholderItems() => Array.Empty<TimelineItemViewModel>();
+    }
+}
