@@ -82,8 +82,83 @@ internal sealed class LastNotifiedTracker
             cancellationToken: ct)).ConfigureAwait(false);
     }
 
-    private static DateTimeOffset? ParseNullableDate(string? value) =>
-        string.IsNullOrEmpty(value)
-            ? null
-            : DateTimeOffset.Parse(value, null, DateTimeStyles.RoundtripKind);
+    /// <summary>
+    /// Atomically marks <paramref name="notificationId"/> as notified at
+    /// <paramref name="at"/> if and only if no prior notification has been
+    /// recorded (i.e. <c>last_notified_at IS NULL</c> or the row does not yet
+    /// exist). Returns <c>true</c> when this call performed the marking,
+    /// <c>false</c> when another caller had already marked it.
+    /// </summary>
+    /// <remarks>
+    /// Implemented as a single SQLite <c>INSERT … ON CONFLICT … DO UPDATE …
+    /// WHERE last_notified_at IS NULL</c> statement. SQLite reports the number
+    /// of rows actually written (inserted or updated); a result of <c>1</c>
+    /// means this caller won the race, <c>0</c> means another writer had
+    /// already populated <c>last_notified_at</c>. This eliminates the
+    /// Get-then-Set TOCTOU window in the previous gate logic.
+    /// </remarks>
+    public async Task<bool> TryMarkAsNotifiedAsync(
+        string accountId,
+        string notificationId,
+        DateTimeOffset at,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(accountId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(notificationId);
+
+        await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
+
+        // The WHERE clause on the DO UPDATE branch ensures the update only
+        // happens when no prior notification is recorded. If the row already
+        // exists with a non-null last_notified_at, the conflict triggers an
+        // update whose WHERE filters it out, yielding 0 affected rows.
+        const string sql = """
+                           INSERT INTO notification_local_states (
+                               notification_id, account_id, last_notified_at, is_hidden)
+                           VALUES (@id, @account, @at, 0)
+                           ON CONFLICT(notification_id) DO UPDATE SET
+                               account_id = excluded.account_id,
+                               last_notified_at = excluded.last_notified_at
+                           WHERE notification_local_states.last_notified_at IS NULL;
+                           """;
+
+        var affected = await connection.ExecuteAsync(new CommandDefinition(
+            sql,
+            new
+            {
+                id = notificationId,
+                account = accountId,
+                at = at.ToString("O"),
+            },
+            cancellationToken: ct)).ConfigureAwait(false);
+
+        return affected == 1;
+    }
+
+    /// <summary>
+    /// Parses an ISO-8601 round-trip-formatted timestamp written by
+    /// <see cref="SetLastNotifiedAsync"/> / <see cref="TryMarkAsNotifiedAsync"/>.
+    /// Returns <c>null</c> for null/empty input or any value that cannot be
+    /// parsed, rather than throwing &mdash; callers treat "no value" the same
+    /// as "unparseable" and the dedup gate fails open (re-notifies) rather
+    /// than crashing the sync loop on a corrupted row.
+    /// </summary>
+    internal static DateTimeOffset? ParseNullableDate(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return null;
+        }
+
+        if (!DateTimeOffset.TryParse(
+                value,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind,
+                out var parsed))
+        {
+            return null;
+        }
+
+        return parsed;
+    }
 }
