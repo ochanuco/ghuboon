@@ -19,10 +19,13 @@ namespace Ghuboon.Infrastructure.Notifications;
 /// id, which would enable click handling and richer presentation.
 /// </para>
 /// <para>
-/// The process is launched with stdout/stderr redirected and discarded; the
-/// task completes once <c>osascript</c> exits. Failures are logged and
-/// swallowed so that a malfunctioning notification path cannot break sync
-/// (PLAN.md Phase 11 acceptance criteria).
+/// The process is launched with stderr redirected and consumed asynchronously
+/// before <see cref="Process.WaitForExitAsync(System.Threading.CancellationToken)"/>
+/// so the child cannot block writing to a full stderr pipe. stdout is left
+/// inheriting the parent (we do not need its output) to avoid the same
+/// deadlock class on the stdout pipe. Failures are logged and swallowed so
+/// that a malfunctioning notification path cannot break sync (PLAN.md
+/// Phase 11 acceptance criteria).
 /// </para>
 /// </remarks>
 public sealed class MacOSDesktopNotificationService : IDesktopNotificationService
@@ -48,7 +51,10 @@ public sealed class MacOSDesktopNotificationService : IDesktopNotificationServic
             {
                 FileName = OsaScriptExecutable,
                 UseShellExecute = false,
-                RedirectStandardOutput = true,
+                // stdout is intentionally not redirected: we never read it, so
+                // redirecting + leaving it unread is a deadlock risk if the
+                // child were to write more than the pipe buffer.
+                RedirectStandardOutput = false,
                 RedirectStandardError = true,
                 CreateNoWindow = true,
             };
@@ -62,11 +68,15 @@ public sealed class MacOSDesktopNotificationService : IDesktopNotificationServic
                 return;
             }
 
+            // Start draining stderr before WaitForExitAsync so the child can
+            // never block on a full stderr pipe (classic Process deadlock).
+            var stderrTask = process.StandardError.ReadToEndAsync(ct);
+
             await process.WaitForExitAsync(ct).ConfigureAwait(false);
+            var stderr = await stderrTask.ConfigureAwait(false);
 
             if (process.ExitCode != 0)
             {
-                var stderr = await process.StandardError.ReadToEndAsync(ct).ConfigureAwait(false);
                 _log.Warning(
                     "osascript exited with code {Code} for notification {Id}: {Stderr}",
                     process.ExitCode,
