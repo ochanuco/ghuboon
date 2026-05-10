@@ -109,7 +109,15 @@ public class NotificationSyncServiceTests
         var first = BuildNotification("1", NotificationReason.Review);
         h.Api.EnqueueList(new NotificationsResponse(new[] { first }, "\"e1\"", RateLimitInfo.Empty, NotModified: false));
 
-        var second = BuildNotification("2", NotificationReason.Mention);
+        // The second notification's UpdatedAt must be > the
+        // LastSuccessfulSyncAt persisted by the first sync (which is the
+        // harness clock). The "old-event suppression" gate
+        // (notification.UpdatedAt > state.LastSuccessfulSyncAt) is what
+        // keeps banners quiet for zombie threads upstream surfaces with
+        // stale timestamps; the test's job is to exercise the truly-new
+        // path, so set updatedAt explicitly.
+        var second = BuildNotification("2", NotificationReason.Mention,
+            updatedAt: h.Clock.UtcNow.AddMinutes(1));
         h.Api.EnqueueList(new NotificationsResponse(new[] { first, second }, "\"e2\"", RateLimitInfo.Empty, NotModified: false));
 
         var service = h.BuildService();
