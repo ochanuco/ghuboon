@@ -121,8 +121,10 @@ public class TimelineViewModelTests
             DateTimeOffset? updatedAt = null,
             string subjectType = "PullRequest")
         {
+            // GitHubNotification invariants require Id == "{AccountId}:{ThreadId}".
+            var threadId = Guid.NewGuid().ToString();
             Notifications.Add(TimelineTestData.Build(
-                Guid.NewGuid().ToString(),
+                $"primary:{threadId}",
                 "primary",
                 repo,
                 title,

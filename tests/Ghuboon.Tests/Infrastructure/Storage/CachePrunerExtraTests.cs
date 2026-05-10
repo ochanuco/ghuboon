@@ -12,17 +12,22 @@ namespace Ghuboon.Tests.Infrastructure.Storage;
 /// </summary>
 public class CachePrunerExtraTests
 {
-    private static GitHubNotification Build(string id, string accountId = "primary") =>
-        new(
+    private static GitHubNotification Build(string id, string accountId = "primary")
+    {
+        // GitHubNotification invariants require Id == "{AccountId}:{ThreadId}".
+        var sep = id.IndexOf(':');
+        var threadId = sep >= 0 ? id[(sep + 1)..] : id;
+        return new GitHubNotification(
             Id: id,
             AccountId: accountId,
-            ThreadId: id,
+            ThreadId: threadId,
             RepositoryFullName: "octo/repo",
             Subject: new NotificationSubject("Issue", "Title", null, null),
             Reason: NotificationReason.Mention,
             Unread: true,
             UpdatedAt: new DateTimeOffset(2026, 5, 1, 0, 0, 0, TimeSpan.Zero),
             LastReadAt: null);
+    }
 
     [Fact]
     public async Task Prune_BoundaryAtCutoff_KeepsRowSyncedExactlyAtCutoff()

@@ -12,8 +12,9 @@ public class HighPriorityNotificationGateTests
         NotificationReason reason,
         string accountId = "acct-1")
     {
+        // GitHubNotification invariants require Id == "{AccountId}:{ThreadId}".
         return new GitHubNotification(
-            Id: id,
+            Id: $"{accountId}:{id}",
             AccountId: accountId,
             ThreadId: id,
             RepositoryFullName: "ochanuco/ghuboon",
@@ -60,11 +61,11 @@ public class HighPriorityNotificationGateTests
         var first = await gate.FilterAsync("acct-1", new[] { notif });
 
         Assert.Single(first);
-        Assert.Equal("n1", first[0].Id);
+        Assert.Equal("acct-1:n1", first[0].Id);
 
         // Verify last_notified_at was persisted by the dedup write.
         var tracker = new LastNotifiedTrackerProbe(temp.Factory);
-        var stored = await tracker.GetLastNotifiedAtAsync("n1");
+        var stored = await tracker.GetLastNotifiedAtAsync("acct-1:n1");
         Assert.NotNull(stored);
         Assert.Equal(clock.UtcNow, stored);
     }
@@ -105,7 +106,7 @@ public class HighPriorityNotificationGateTests
         var result = await gate.FilterAsync("acct-1", new[] { n1, n2, n3, n4 });
 
         var ids = result.Select(r => r.Id).ToArray();
-        Assert.Equal(new[] { "n2", "n4" }, ids);
+        Assert.Equal(new[] { "acct-1:n2", "acct-1:n4" }, ids);
     }
 
     [Fact]
