@@ -19,6 +19,14 @@ public partial class NotificationsSettingsViewModel : ViewModelBase
     public const string OsNotificationsEnabledKey = "notifications.os.enabled";
 
     private readonly IAppSettingsService _appSettings;
+    // Issue #43: capture the construction-time scheduler so persistence
+    // continuations (which mutate observable properties and therefore raise
+    // PropertyChanged) run on the UI thread. When the VM is constructed off a
+    // SynchronizationContext (typical in unit tests), we fall back to a
+    // synchronous, default-scheduler continuation so tests can observe the
+    // reverted state without a UI dispatcher.
+    private readonly TaskScheduler _persistContinuationScheduler;
+    private readonly TaskContinuationOptions _persistContinuationOptions;
     private bool _suppressPersist;
 
     [ObservableProperty]
@@ -37,6 +45,21 @@ public partial class NotificationsSettingsViewModel : ViewModelBase
     public NotificationsSettingsViewModel(IAppSettingsService appSettings)
     {
         _appSettings = appSettings;
+
+        // Capture the UI synchronization context if we're constructed on one
+        // (e.g., the Avalonia UI thread). Off-context construction (tests)
+        // falls back to running the continuation synchronously on the
+        // completing task's thread; that keeps deterministic test behavior.
+        if (SynchronizationContext.Current is not null)
+        {
+            _persistContinuationScheduler = TaskScheduler.FromCurrentSynchronizationContext();
+            _persistContinuationOptions = TaskContinuationOptions.None;
+        }
+        else
+        {
+            _persistContinuationScheduler = TaskScheduler.Default;
+            _persistContinuationOptions = TaskContinuationOptions.ExecuteSynchronously;
+        }
     }
 
     /// <summary>
@@ -81,9 +104,10 @@ public partial class NotificationsSettingsViewModel : ViewModelBase
 
         // Persistence failures must surface to the UI (Issue #18). Attach a
         // continuation that flips the toggle back and exposes the error message
-        // when the write fails. Running the continuation synchronously means
-        // tests that await the persist task observe the reverted state without
-        // needing a UI dispatcher.
+        // when the write fails. Issue #43: schedule the continuation on the
+        // captured UI synchronization context (when present) so PropertyChanged
+        // events for PersistErrorMessage and OsNotificationsEnabled — and the
+        // _suppressPersist mutation — are raised on the UI thread.
         var task = _appSettings.SetBoolAsync(OsNotificationsEnabledKey, value);
         _ = task.ContinueWith(
             t =>
@@ -110,7 +134,7 @@ public partial class NotificationsSettingsViewModel : ViewModelBase
                 }
             },
             CancellationToken.None,
-            TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
+            _persistContinuationOptions,
+            _persistContinuationScheduler);
     }
 }
