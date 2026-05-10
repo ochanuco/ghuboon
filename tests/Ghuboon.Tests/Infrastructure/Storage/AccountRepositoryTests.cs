@@ -8,7 +8,7 @@ public class AccountRepositoryTests
     [Fact]
     public async Task Upsert_then_get_by_id_roundtrips_account()
     {
-        await using var temp = new TempDatabase();
+        await using var temp = new TempDatabase(seedAccounts: false);
         var repo = new AccountRepository(temp.Factory);
 
         var account = new Account(
@@ -35,7 +35,7 @@ public class AccountRepositoryTests
     [Fact]
     public async Task Upsert_replaces_existing_row_with_same_id()
     {
-        await using var temp = new TempDatabase();
+        await using var temp = new TempDatabase(seedAccounts: false);
         var repo = new AccountRepository(temp.Factory);
 
         var initial = new Account(
@@ -62,7 +62,7 @@ public class AccountRepositoryTests
     [Fact]
     public async Task List_returns_all_accounts_in_creation_order()
     {
-        await using var temp = new TempDatabase();
+        await using var temp = new TempDatabase(seedAccounts: false);
         var repo = new AccountRepository(temp.Factory);
 
         var a = new Account("a", "github.com", "a", "ka",
@@ -83,7 +83,7 @@ public class AccountRepositoryTests
     [Fact]
     public async Task GetByIdAsync_returns_null_when_missing()
     {
-        await using var temp = new TempDatabase();
+        await using var temp = new TempDatabase(seedAccounts: false);
         var repo = new AccountRepository(temp.Factory);
 
         var read = await repo.GetByIdAsync("does-not-exist");

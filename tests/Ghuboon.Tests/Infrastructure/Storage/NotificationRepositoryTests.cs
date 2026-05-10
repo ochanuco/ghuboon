@@ -27,7 +27,7 @@ public class NotificationRepositoryTests
     [Fact]
     public async Task Upsert_then_get_by_id_roundtrips_notification()
     {
-        await using var temp = new TempDatabase();
+        await using var temp = new TempDatabase(seedNotifications: false);
         var repo = new NotificationRepository(temp.Factory);
 
         var notif = SampleNotification();
@@ -50,7 +50,7 @@ public class NotificationRepositoryTests
     [Fact]
     public async Task Second_upsert_with_same_id_replaces_fields()
     {
-        await using var temp = new TempDatabase();
+        await using var temp = new TempDatabase(seedNotifications: false);
         var repo = new NotificationRepository(temp.Factory);
         var syncedAt = DateTimeOffset.UtcNow;
 
@@ -78,7 +78,7 @@ public class NotificationRepositoryTests
     [Fact]
     public async Task ListByAccount_returns_only_matching_account_ordered_by_updated()
     {
-        await using var temp = new TempDatabase();
+        await using var temp = new TempDatabase(seedNotifications: false);
         var repo = new NotificationRepository(temp.Factory);
         var syncedAt = DateTimeOffset.UtcNow;
 
@@ -105,7 +105,7 @@ public class NotificationRepositoryTests
     [Fact]
     public async Task DeleteOlderThan_removes_only_stale_rows()
     {
-        await using var temp = new TempDatabase();
+        await using var temp = new TempDatabase(seedNotifications: false);
         var repo = new NotificationRepository(temp.Factory);
 
         var old = SampleNotification(id: "acct-1:old");
@@ -128,7 +128,7 @@ public class NotificationRepositoryTests
     [Fact]
     public async Task GetById_returns_null_for_missing_row()
     {
-        await using var temp = new TempDatabase();
+        await using var temp = new TempDatabase(seedNotifications: false);
         var repo = new NotificationRepository(temp.Factory);
 
         Assert.Null(await repo.GetByIdAsync("missing"));
