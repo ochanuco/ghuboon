@@ -59,14 +59,17 @@ public sealed class HighPriorityNotificationGate : IDesktopNotificationGate
                 continue;
             }
 
-            var last = await _tracker.GetLastNotifiedAtAsync(candidate.Id, ct).ConfigureAwait(false);
-            if (last is not null)
+            // Atomic mark-and-claim eliminates the TOCTOU window between a
+            // separate Get and Set: under concurrent sync the SQL statement
+            // either marks the row (returns true) or observes another writer
+            // already marked it (returns false). Only the winner emits the
+            // notification, preventing duplicates.
+            if (await _tracker
+                    .TryMarkAsNotifiedAsync(accountId, candidate.Id, now, ct)
+                    .ConfigureAwait(false))
             {
-                continue;
+                accepted.Add(candidate);
             }
-
-            await _tracker.SetLastNotifiedAsync(accountId, candidate.Id, now, ct).ConfigureAwait(false);
-            accepted.Add(candidate);
         }
 
         return accepted;
