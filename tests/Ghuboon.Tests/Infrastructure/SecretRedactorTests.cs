@@ -5,19 +5,27 @@ namespace Ghuboon.Tests.Infrastructure;
 public class SecretRedactorTests
 {
     [Theory]
-    [InlineData("Authorization: token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
-    [InlineData("authorization: Bearer abc.def.ghi")]
-    [InlineData("AUTHORIZATION:    Bearer xyz")]
-    [InlineData("Authorization:Bearer compact")]
-    public void Redact_masks_authorization_header(string input)
+    [InlineData("Authorization: token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "Authorization: ")]
+    [InlineData("authorization: Bearer abc.def.ghi", "authorization: ")]
+    [InlineData("AUTHORIZATION:    Bearer xyz", "AUTHORIZATION:    ")]
+    [InlineData("Authorization:Bearer compact", "Authorization:")]
+    // Header value containing internal whitespace must still be fully redacted —
+    // the regex now captures the entire header value, not just the first token.
+    [InlineData("Authorization: Bearer token with spaces inside", "Authorization: ")]
+    // Non-ASCII characters in the value (e.g., a malformed token) must not slip
+    // through as a residue.
+    [InlineData("Authorization: Bearer tokén-wíth-unicode", "Authorization: ")]
+    public void Redact_masks_authorization_header(string input, string expectedPrefix)
     {
         var output = SecretRedactor.Redact(input);
 
-        Assert.Contains("[REDACTED]", output);
+        // The full header value is replaced wholesale: the only thing left after the
+        // colon (and any inter-token whitespace originally present after it) is the
+        // [REDACTED] sentinel.
+        Assert.Equal(expectedPrefix + SecretRedactor.Replacement, output);
         Assert.DoesNotContain("ghp_", output, StringComparison.Ordinal);
-        Assert.DoesNotContain("Bearer abc", output, StringComparison.Ordinal);
-        Assert.DoesNotContain("Bearer xyz", output, StringComparison.Ordinal);
-        Assert.DoesNotContain("Bearer compact", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("Bearer", output, StringComparison.Ordinal);
+        Assert.DoesNotContain("token", output, StringComparison.Ordinal);
     }
 
     [Theory]

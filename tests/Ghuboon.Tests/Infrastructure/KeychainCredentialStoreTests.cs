@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using Ghuboon.Infrastructure.Credentials;
 
 namespace Ghuboon.Tests.Infrastructure;
@@ -6,18 +5,21 @@ namespace Ghuboon.Tests.Infrastructure;
 [Trait("Category", "RequiresKeychain")]
 public class KeychainCredentialStoreTests
 {
-    private static bool IsMacOs => RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
-
     private const string TestService = "com.ghuboon.test";
 
-    [Fact]
+    /// <summary>
+    /// Unified inconclusive-failure detector for headless CI keychains.
+    /// CI hosts often have a locked Keychain or no GUI session, which surfaces as
+    /// either "interaction is not allowed" or "could not be authenticated" from
+    /// <c>/usr/bin/security</c>. Both should be treated as inconclusive in tests.
+    /// </summary>
+    private static bool IsInconclusiveKeychainFailure(Exception ex) =>
+        ex.Message.Contains("interaction is not allowed", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("could not be authenticated", StringComparison.OrdinalIgnoreCase);
+
+    [MacOnlyFact]
     public async Task Roundtrip_set_get_delete_returns_null_after_delete()
     {
-        if (!IsMacOs)
-        {
-            return; // Skip on non-macOS hosts; Keychain backend is macOS-only.
-        }
-
         var store = new KeychainCredentialStore(TestService);
         var key = "ghuboon.test." + Guid.NewGuid().ToString("N");
         const string value = "synthetic-test-value-not-a-real-secret";
@@ -34,8 +36,7 @@ public class KeychainCredentialStoreTests
             var afterDelete = await store.GetAsync(key);
             Assert.Null(afterDelete);
         }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("interaction is not allowed", StringComparison.OrdinalIgnoreCase)
-                                                   || ex.Message.Contains("could not be authenticated", StringComparison.OrdinalIgnoreCase))
+        catch (InvalidOperationException ex) when (IsInconclusiveKeychainFailure(ex))
         {
             // CI keychain is locked / no GUI session; treat as inconclusive.
             return;
@@ -53,14 +54,9 @@ public class KeychainCredentialStoreTests
         }
     }
 
-    [Fact]
+    [MacOnlyFact]
     public async Task GetAsync_returns_null_for_missing_key()
     {
-        if (!IsMacOs)
-        {
-            return;
-        }
-
         var store = new KeychainCredentialStore(TestService);
         var key = "ghuboon.test.missing." + Guid.NewGuid().ToString("N");
 
@@ -69,20 +65,15 @@ public class KeychainCredentialStoreTests
             var result = await store.GetAsync(key);
             Assert.Null(result);
         }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("interaction is not allowed", StringComparison.OrdinalIgnoreCase))
+        catch (InvalidOperationException ex) when (IsInconclusiveKeychainFailure(ex))
         {
             return;
         }
     }
 
-    [Fact]
+    [MacOnlyFact]
     public async Task DeleteAsync_is_idempotent_for_missing_key()
     {
-        if (!IsMacOs)
-        {
-            return;
-        }
-
         var store = new KeychainCredentialStore(TestService);
         var key = "ghuboon.test.missing." + Guid.NewGuid().ToString("N");
 
@@ -90,7 +81,7 @@ public class KeychainCredentialStoreTests
         {
             await store.DeleteAsync(key); // should not throw
         }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("interaction is not allowed", StringComparison.OrdinalIgnoreCase))
+        catch (InvalidOperationException ex) when (IsInconclusiveKeychainFailure(ex))
         {
             return;
         }
