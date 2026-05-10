@@ -26,10 +26,22 @@ internal static class NotificationMapper
             return null;
         }
 
-        var repoFullName = dto.Repository?.FullName
-            ?? (dto.Repository is { Owner.Login: { } login, Name: { } name }
-                ? $"{login}/{name}"
-                : null);
+        var repoFullName = dto.Repository?.FullName;
+        if (string.IsNullOrWhiteSpace(repoFullName))
+        {
+            // Synthesize from owner/name only when both halves are non-empty; otherwise we
+            // would build "owner/" or "/name" which is silently wrong (issue #11).
+            if (dto.Repository is { Owner.Login: var login, Name: var name } &&
+                !string.IsNullOrWhiteSpace(login) &&
+                !string.IsNullOrWhiteSpace(name))
+            {
+                repoFullName = $"{login}/{name}";
+            }
+            else
+            {
+                repoFullName = null;
+            }
+        }
 
         if (string.IsNullOrWhiteSpace(repoFullName))
         {
@@ -71,6 +83,10 @@ internal static class NotificationMapper
     /// </summary>
     public static IReadOnlyList<GitHubNotification> Map(IEnumerable<NotificationDto> dtos, string accountId)
     {
+        // Validate accountId BEFORE dtos so a missing/empty accountId never silently
+        // bypasses the guard when the caller also passes an empty/null collection
+        // (issue #11).
+        ArgumentException.ThrowIfNullOrWhiteSpace(accountId);
         ArgumentNullException.ThrowIfNull(dtos);
         var result = new List<GitHubNotification>();
         foreach (var dto in dtos)

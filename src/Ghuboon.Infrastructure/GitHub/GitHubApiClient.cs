@@ -104,32 +104,51 @@ public sealed class GitHubApiClient : IGitHubApiClient
             httpRequest.Headers.IfNoneMatch.ParseAdd(request.IfNoneMatch);
         }
 
-        using var response = await _http.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-
-        var rateLimit = ParseRateLimit(response);
-        var etag = response.Headers.ETag?.Tag;
-
-        if (response.StatusCode == HttpStatusCode.NotModified)
+        try
         {
-            _log.Information("Notifications not modified (304); reusing cached etag");
-            return new NotificationsResponse(Array.Empty<GitHubNotification>(), etag, rateLimit, true);
-        }
+            using var response = await _http.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
 
-        if (response.StatusCode == HttpStatusCode.OK)
+            var rateLimit = ParseRateLimit(response);
+            var etag = response.Headers.ETag?.Tag;
+
+            if (response.StatusCode == HttpStatusCode.NotModified)
+            {
+                _log.Information("Notifications not modified (304); reusing cached etag");
+                return new NotificationsResponse(Array.Empty<GitHubNotification>(), etag, rateLimit, true);
+            }
+
+            if (response.StatusCode == HttpStatusCode.OK)
+            {
+                var dtos = await response.Content
+                    .ReadFromJsonAsync<List<NotificationDto>>(JsonOptions, ct)
+                    .ConfigureAwait(false) ?? new List<NotificationDto>();
+
+                var mapped = NotificationMapper.Map(dtos, request.AccountId);
+                _log.Information("Fetched {Count} notifications", mapped.Count);
+                return new NotificationsResponse(mapped, etag, rateLimit, false);
+            }
+
+            var body = await ReadBodySafelyAsync(response, ct).ConfigureAwait(false);
+            var (category, message) = MapErrorStatus(response, body);
+            _log.Warning("ListNotifications failed: status {StatusCode} category {Category}", (int)response.StatusCode, category);
+            throw new GitHubApiException(category, message, (int)response.StatusCode);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            var dtos = await response.Content
-                .ReadFromJsonAsync<List<NotificationDto>>(JsonOptions, ct)
-                .ConfigureAwait(false) ?? new List<NotificationDto>();
-
-            var mapped = NotificationMapper.Map(dtos, request.AccountId);
-            _log.Information("Fetched {Count} notifications", mapped.Count);
-            return new NotificationsResponse(mapped, etag, rateLimit, false);
+            // Caller cancelled — propagate cleanly so SyncAsync/test code can observe OCE.
+            throw;
         }
-
-        var body = await ReadBodySafelyAsync(response, ct).ConfigureAwait(false);
-        var (category, message) = MapErrorStatus(response, body);
-        _log.Warning("ListNotifications failed: status {StatusCode} category {Category}", (int)response.StatusCode, category);
-        throw new GitHubApiException(category, message, (int)response.StatusCode);
+        catch (HttpRequestException ex)
+        {
+            _log.Warning(ex, "Network error during ListNotifications");
+            throw new GitHubApiException(ErrorCategory.Network, ex.Message, 0, ex);
+        }
+        catch (TaskCanceledException ex)
+        {
+            // Timeout (not user cancellation, since we filtered above).
+            _log.Warning(ex, "Timeout during ListNotifications");
+            throw new GitHubApiException(ErrorCategory.Network, ex.Message, 0, ex);
+        }
     }
 
     public async Task MarkThreadReadAsync(string pat, string threadId, CancellationToken ct = default)
@@ -140,18 +159,38 @@ public sealed class GitHubApiClient : IGitHubApiClient
         _log.Information("Marking thread {ThreadId} as read", threadId);
 
         using var request = BuildRequest(HttpMethod.Patch, $"notifications/threads/{Uri.EscapeDataString(threadId)}", pat);
-        using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
 
-        // GitHub returns 205 Reset Content on success. Some proxies surface 200; accept both.
-        if (response.StatusCode == HttpStatusCode.ResetContent || response.StatusCode == HttpStatusCode.OK)
+        try
         {
-            return;
-        }
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
 
-        var body = await ReadBodySafelyAsync(response, ct).ConfigureAwait(false);
-        var (category, message) = MapErrorStatus(response, body);
-        _log.Warning("MarkThreadRead failed: status {StatusCode} category {Category}", (int)response.StatusCode, category);
-        throw new GitHubApiException(category, message, (int)response.StatusCode);
+            // GitHub returns 205 Reset Content on success. Some proxies surface 200; accept both.
+            if (response.StatusCode == HttpStatusCode.ResetContent || response.StatusCode == HttpStatusCode.OK)
+            {
+                return;
+            }
+
+            var body = await ReadBodySafelyAsync(response, ct).ConfigureAwait(false);
+            var (category, message) = MapErrorStatus(response, body);
+            _log.Warning("MarkThreadRead failed: status {StatusCode} category {Category}", (int)response.StatusCode, category);
+            throw new GitHubApiException(category, message, (int)response.StatusCode);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Caller cancelled — propagate cleanly.
+            throw;
+        }
+        catch (HttpRequestException ex)
+        {
+            _log.Warning(ex, "Network error during MarkThreadRead");
+            throw new GitHubApiException(ErrorCategory.Network, ex.Message, 0, ex);
+        }
+        catch (TaskCanceledException ex)
+        {
+            // Timeout (not user cancellation, since we filtered above).
+            _log.Warning(ex, "Timeout during MarkThreadRead");
+            throw new GitHubApiException(ErrorCategory.Network, ex.Message, 0, ex);
+        }
     }
 
     private static HttpRequestMessage BuildRequest(HttpMethod method, string relativePath, string pat)
@@ -204,7 +243,21 @@ public sealed class GitHubApiClient : IGitHubApiClient
             var raw = resetValues.FirstOrDefault();
             if (long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var unix))
             {
-                resetAt = DateTimeOffset.FromUnixTimeSeconds(unix);
+                // DateTimeOffset.FromUnixTimeSeconds throws ArgumentOutOfRangeException for
+                // values outside [-62135596800, 253402300799]. Cheap pre-check + defensive
+                // try/catch leaves resetAt = null on bad input rather than crashing the client
+                // (issue #11).
+                if (unix is >= 0 and <= 253_402_300_799L)
+                {
+                    try
+                    {
+                        resetAt = DateTimeOffset.FromUnixTimeSeconds(unix);
+                    }
+                    catch (ArgumentOutOfRangeException)
+                    {
+                        resetAt = null;
+                    }
+                }
             }
         }
 
@@ -303,6 +356,13 @@ public sealed class GitHubApiException : Exception
 
     public GitHubApiException(ErrorCategory category, string message, int statusCode)
         : base(message)
+    {
+        Category = category;
+        StatusCode = statusCode;
+    }
+
+    public GitHubApiException(ErrorCategory category, string message, int statusCode, Exception? innerException)
+        : base(message, innerException)
     {
         Category = category;
         StatusCode = statusCode;
