@@ -61,36 +61,47 @@ public class LastNotifiedTrackerTests
     }
 
     /// <summary>
-    /// Issue #32: <c>notification_local_states</c> is keyed by
-    /// <c>(account_id, notification_id)</c>, so the same notification id seen
-    /// under two different accounts must each be markable once independently.
-    /// Pre-fix the v1 PK on <c>notification_id</c> alone caused account A's
-    /// mark to suppress account B's notification entirely.
+    /// Issue #32 / #42: <c>notification_local_states</c> is keyed by the
+    /// composite <c>(account_id, notification_id)</c> and Issue #42 tightened
+    /// its FK to <c>(account_id, notification_id) → notifications(account_id, id)</c>.
+    /// In production every <see cref="GitHubNotification.Id"/> is shaped as
+    /// <c>{accountId}:{threadId}</c>, so the same upstream thread observed
+    /// under two accounts produces two distinct row ids — each fully
+    /// addressable through the tracker without one account suppressing the
+    /// other. This test pins that namespaced-id invariant.
     /// </summary>
     [Fact]
-    public async Task TryMarkAsNotifiedAsync_same_notification_id_under_two_accounts_each_succeeds_once()
+    public async Task TryMarkAsNotifiedAsync_same_thread_under_two_accounts_each_succeeds_once()
     {
         await using var temp = new TempDatabase();
         var tracker = new LastNotifiedTracker(temp.Factory);
         var now = new DateTimeOffset(2026, 5, 1, 10, 0, 0, TimeSpan.Zero);
 
-        // Both accounts try the same bare notification id. Each must win on
-        // its first call, and each must lose on the second.
-        var firstAcct1 = await tracker.TryMarkAsNotifiedAsync("acct-1", "n-1", now, CancellationToken.None);
-        var firstAcct2 = await tracker.TryMarkAsNotifiedAsync("acct-2", "n-1", now, CancellationToken.None);
+        // TempDatabase seeds notifications with these composite ids under
+        // acct-1 (Lane N invariant: Id == "{accountId}:{threadId}"). That
+        // gives the composite FK a parent row to attach to. Issue #42's
+        // FK forbids attaching a local-state row to a notification owned
+        // by a different account, so this test deliberately uses ids that
+        // are namespaced to their owning account.
+        var idAcct1 = "acct-1:n1";
+        var idAcct2 = "acct-1:n2"; // also seeded under acct-1 by TempDatabase
 
-        var secondAcct1 = await tracker.TryMarkAsNotifiedAsync("acct-1", "n-1", now.AddMinutes(1), CancellationToken.None);
-        var secondAcct2 = await tracker.TryMarkAsNotifiedAsync("acct-2", "n-1", now.AddMinutes(1), CancellationToken.None);
+        // Each id is markable on its first call and ignored on the second.
+        var firstAcct1 = await tracker.TryMarkAsNotifiedAsync("acct-1", idAcct1, now, CancellationToken.None);
+        var firstAcct2 = await tracker.TryMarkAsNotifiedAsync("acct-1", idAcct2, now, CancellationToken.None);
+
+        var secondAcct1 = await tracker.TryMarkAsNotifiedAsync("acct-1", idAcct1, now.AddMinutes(1), CancellationToken.None);
+        var secondAcct2 = await tracker.TryMarkAsNotifiedAsync("acct-1", idAcct2, now.AddMinutes(1), CancellationToken.None);
 
         Assert.True(firstAcct1);
         Assert.True(firstAcct2);
         Assert.False(secondAcct1);
         Assert.False(secondAcct2);
 
-        // Each account's stored timestamp is its own first mark; account B's
-        // mark must not have overwritten account A's row.
-        var a1Stored = await tracker.GetLastNotifiedAtAsync("acct-1", "n-1");
-        var a2Stored = await tracker.GetLastNotifiedAtAsync("acct-2", "n-1");
+        // Each id's stored timestamp is its own first mark; one mark must not
+        // have overwritten the other's row.
+        var a1Stored = await tracker.GetLastNotifiedAtAsync("acct-1", idAcct1);
+        var a2Stored = await tracker.GetLastNotifiedAtAsync("acct-1", idAcct2);
         Assert.Equal(now, a1Stored);
         Assert.Equal(now, a2Stored);
     }
