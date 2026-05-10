@@ -8,23 +8,49 @@ namespace Ghuboon.Tests.App.Timeline;
 
 public class DbBackedTimelineServiceTests
 {
-    private static (DbBackedTimelineService svc, FakeNotificationRepository nrepo, FakeRepositoryRepository rrepo) Build()
+    private static (DbBackedTimelineService svc, FakeNotificationEventRepository erepo, FakeRepositoryRepository rrepo) Build()
     {
-        var nrepo = new FakeNotificationRepository();
+        var erepo = new FakeNotificationEventRepository();
         var rrepo = new FakeRepositoryRepository();
         var arepo = new FakeAccountRepository();
-        var svc = new DbBackedTimelineService(nrepo, rrepo, arepo, accountId: "primary");
+        var svc = new DbBackedTimelineService(erepo, rrepo, arepo, accountId: "primary");
 
         var t0 = new DateTimeOffset(2026, 5, 9, 12, 0, 0, TimeSpan.Zero);
-        nrepo.Notifications.Add(TimelineTestData.Build("primary:a", "primary", "octocat/repo1", "Add CONTRIBUTING", NotificationReason.Review, true, t0.AddMinutes(-10), "PullRequest"));
-        nrepo.Notifications.Add(TimelineTestData.Build("primary:b", "primary", "octocat/repo2", "Mention me", NotificationReason.Mention, true, t0.AddMinutes(-2), "Issue"));
-        nrepo.Notifications.Add(TimelineTestData.Build("primary:c", "primary", "octocat/repo1", "TeamMention!", NotificationReason.TeamMention, false, t0.AddMinutes(-30), "PullRequest"));
-        nrepo.Notifications.Add(TimelineTestData.Build("primary:d", "primary", "ghuboon/playground", "My PR", NotificationReason.MyPr, true, t0.AddHours(-2), "PullRequest"));
-        nrepo.Notifications.Add(TimelineTestData.Build("primary:e", "primary", "watcher/repo", "Watching", NotificationReason.Watching, false, t0.AddDays(-1), "Issue"));
+        // ObservedAt drives ListByAccount ordering; SourceUpdatedAt is what the
+        // VM displays. They diverge in the production wiring (sync writes
+        // ObservedAt = clock.UtcNow) so seed both deliberately.
+        Seed(erepo, "primary:a", "primary", "octocat/repo1", "Add CONTRIBUTING", NotificationReason.Review, true, t0.AddMinutes(-10), "PullRequest");
+        Seed(erepo, "primary:b", "primary", "octocat/repo2", "Mention me", NotificationReason.Mention, true, t0.AddMinutes(-2), "Issue");
+        Seed(erepo, "primary:c", "primary", "octocat/repo1", "TeamMention!", NotificationReason.TeamMention, false, t0.AddMinutes(-30), "PullRequest");
+        Seed(erepo, "primary:d", "primary", "ghuboon/playground", "My PR", NotificationReason.MyPr, true, t0.AddHours(-2), "PullRequest");
+        Seed(erepo, "primary:e", "primary", "watcher/repo", "Watching", NotificationReason.Watching, false, t0.AddDays(-1), "Issue");
         // Other-account row should be ignored.
-        nrepo.Notifications.Add(TimelineTestData.Build("other:x", "other", "x/y", "no", NotificationReason.Mention, true, t0));
+        Seed(erepo, "other:x", "other", "x/y", "no", NotificationReason.Mention, true, t0);
 
-        return (svc, nrepo, rrepo);
+        return (svc, erepo, rrepo);
+    }
+
+    private static void Seed(
+        FakeNotificationEventRepository erepo,
+        string notificationId,
+        string accountId,
+        string repo,
+        string title,
+        NotificationReason reason,
+        bool unread,
+        DateTimeOffset updatedAt,
+        string subjectType = "PullRequest")
+    {
+        erepo.TryAppendAsync(TimelineTestData.BuildEvent(
+            eventId: 0, // assign via repo
+            id: notificationId,
+            accountId: accountId,
+            repo: repo,
+            title: title,
+            reason: reason,
+            unread: unread,
+            updatedAt: updatedAt,
+            subjectType: subjectType)).GetAwaiter().GetResult();
     }
 
     [Fact]
@@ -95,15 +121,51 @@ public class DbBackedTimelineServiceTests
     }
 
     [Fact]
-    public async Task Load_OrdersByUpdatedAtDesc()
+    public async Task Load_OrdersByObservedAtDesc()
     {
         var (svc, _, _) = Build();
         var result = await svc.LoadAsync(TimelineFilter.Default);
 
         for (int i = 1; i < result.Count; i++)
         {
-            Assert.True(result[i - 1].UpdatedAt >= result[i].UpdatedAt);
+            Assert.True(result[i - 1].ObservedAt >= result[i].ObservedAt);
         }
+    }
+
+    [Fact]
+    public async Task Load_MultipleEventsForSameThread_AppearAsMultipleRows()
+    {
+        // Event-log timeline core invariant: a thread that updates multiple
+        // times must appear as multiple rows. Seed two events sharing the
+        // same notification id and assert both come back.
+        var (svc, erepo, _) = Build();
+
+        var t0 = new DateTimeOffset(2026, 5, 9, 12, 0, 0, TimeSpan.Zero);
+        await erepo.TryAppendAsync(TimelineTestData.BuildEvent(
+            eventId: 0,
+            id: "primary:e2",
+            accountId: "primary",
+            repo: "octo/multi",
+            title: "Open",
+            reason: NotificationReason.Review,
+            unread: true,
+            updatedAt: t0.AddMinutes(-5),
+            observedAt: t0.AddMinutes(-5)));
+
+        await erepo.TryAppendAsync(TimelineTestData.BuildEvent(
+            eventId: 0,
+            id: "primary:e2",
+            accountId: "primary",
+            repo: "octo/multi",
+            title: "Draft",
+            reason: NotificationReason.Review,
+            unread: true,
+            updatedAt: t0.AddMinutes(-1),
+            observedAt: t0.AddMinutes(-1)));
+
+        var result = await svc.LoadAsync(new TimelineFilter(TimelineTab.All, "octo/multi", null));
+        Assert.Equal(2, result.Count);
+        Assert.All(result, r => Assert.Equal("primary:e2", r.NotificationId));
     }
 
     [Fact]

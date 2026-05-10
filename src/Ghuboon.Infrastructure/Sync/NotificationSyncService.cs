@@ -44,6 +44,7 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
     private readonly IAccountRepository _accountRepository;
     private readonly IRepositoryRepository _repositoryRepository;
     private readonly INotificationRepository _notificationRepository;
+    private readonly INotificationEventRepository _eventRepository;
     private readonly ISyncStateRepository _syncStateRepository;
     private readonly IGitHubApiClient _apiClient;
     private readonly IClock _clock;
@@ -60,6 +61,7 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
         IAccountRepository accountRepository,
         IRepositoryRepository repositoryRepository,
         INotificationRepository notificationRepository,
+        INotificationEventRepository eventRepository,
         ISyncStateRepository syncStateRepository,
         IGitHubApiClient apiClient,
         IClock clock,
@@ -71,6 +73,7 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
         ArgumentNullException.ThrowIfNull(accountRepository);
         ArgumentNullException.ThrowIfNull(repositoryRepository);
         ArgumentNullException.ThrowIfNull(notificationRepository);
+        ArgumentNullException.ThrowIfNull(eventRepository);
         ArgumentNullException.ThrowIfNull(syncStateRepository);
         ArgumentNullException.ThrowIfNull(apiClient);
         ArgumentNullException.ThrowIfNull(clock);
@@ -79,6 +82,7 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
         _accountRepository = accountRepository;
         _repositoryRepository = repositoryRepository;
         _notificationRepository = notificationRepository;
+        _eventRepository = eventRepository;
         _syncStateRepository = syncStateRepository;
         _apiClient = apiClient;
         _clock = clock;
@@ -260,6 +264,44 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 await _notificationRepository
                     .UpsertAsync(notification, rawJson, now, ct)
                     .ConfigureAwait(false);
+
+                // Append an event row alongside the latest-state upsert so the
+                // timeline UI can render one row per observed update. The
+                // unique index on (account_id, notification_id, source_updated_at)
+                // dedups identical re-fetches: when a thread is already known
+                // at the same upstream updated_at, TryAppend returns false and
+                // the timeline stays at one row for that observation. A
+                // separate transition (e.g. PR Open -> Draft) bumps updated_at,
+                // so the next sync inserts a new row and the timeline grows.
+                //
+                // raw_json mirrors the synthesized minimal payload above; once
+                // the API client carries the original GitHub JSON forward
+                // (Phase 7 follow-up), this snapshot becomes the real raw
+                // payload without any further sync-side change.
+                var snapshot = new NotificationEvent(
+                    Id: 0,
+                    AccountId: notification.AccountId,
+                    NotificationId: notification.Id,
+                    ThreadId: notification.ThreadId,
+                    RepositoryFullName: notification.RepositoryFullName,
+                    Subject: notification.Subject,
+                    Reason: notification.Reason,
+                    SourceUpdatedAt: notification.UpdatedAt,
+                    ObservedAt: now,
+                    Unread: notification.Unread,
+                    LastReadAt: notification.LastReadAt,
+                    RawJson: rawJson);
+                try
+                {
+                    await _eventRepository.TryAppendAsync(snapshot, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Event-log append is non-fatal — losing one event row should
+                    // not bring the whole sync down because the latest state in
+                    // notifications is already persisted by the upsert above.
+                    _logger?.Warning(ex, "Append notification event failed for {NotificationId}", notification.Id);
+                }
 
                 if (isNew)
                 {
@@ -515,8 +557,16 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
     private Task PersistSyncStateAsync(SyncState updated, CancellationToken ct) =>
         _syncStateRepository.UpsertAsync(updated, ct);
 
-    private Task PruneAsync(DateTimeOffset now, CancellationToken ct) =>
-        _notificationRepository.DeleteOlderThanAsync(now - CacheRetention, ct);
+    private async Task PruneAsync(DateTimeOffset now, CancellationToken ct)
+    {
+        var cutoff = now - CacheRetention;
+        await _notificationRepository.DeleteOlderThanAsync(cutoff, ct).ConfigureAwait(false);
+        // Event log mirrors the same 30-day retention (ADR-022). Prune by
+        // observed_at because a row's source_updated_at may pre-date observation
+        // (e.g. backfilled threads), and we want retention measured from when
+        // we wrote the row locally.
+        await _eventRepository.DeleteOlderThanAsync(cutoff, ct).ConfigureAwait(false);
+    }
 
     private async Task UpsertRepositoryAsync(string accountId, string fullName, CancellationToken ct)
     {

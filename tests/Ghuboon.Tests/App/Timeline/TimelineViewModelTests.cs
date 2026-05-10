@@ -150,13 +150,14 @@ public class TimelineViewModelTests
 
     /// <summary>
     /// Lightweight test-side <see cref="ITimelineService"/> that maps a list of
-    /// <see cref="GitHubNotification"/> through the same filter/sort logic the
+    /// <see cref="NotificationEvent"/> through the same filter/sort logic the
     /// production service uses. Removes the dependency on the SQLite stack while
     /// still exercising the filter pipeline.
     /// </summary>
     private sealed class FakeTimelineService : ITimelineService
     {
-        public List<GitHubNotification> Notifications { get; } = new();
+        public List<NotificationEvent> Events { get; } = new();
+        private long _nextId = 1;
 
         public void AddNotification(
             NotificationReason reason,
@@ -166,22 +167,28 @@ public class TimelineViewModelTests
             DateTimeOffset? updatedAt = null,
             string subjectType = "PullRequest")
         {
-            // GitHubNotification invariants require Id == "{AccountId}:{ThreadId}".
+            // NotificationEvent invariants mirror GitHubNotification:
+            // NotificationId must equal "{AccountId}:{ThreadId}".
             var threadId = Guid.NewGuid().ToString();
-            Notifications.Add(TimelineTestData.Build(
-                $"primary:{threadId}",
-                "primary",
-                repo,
-                title,
-                reason,
-                unread,
-                updatedAt ?? DateTimeOffset.UtcNow,
-                subjectType));
+            var when = updatedAt ?? DateTimeOffset.UtcNow;
+            Events.Add(new NotificationEvent(
+                Id: _nextId++,
+                AccountId: "primary",
+                NotificationId: $"primary:{threadId}",
+                ThreadId: threadId,
+                RepositoryFullName: repo,
+                Subject: new NotificationSubject(subjectType, title, null, null),
+                Reason: reason,
+                SourceUpdatedAt: when,
+                ObservedAt: when,
+                Unread: unread,
+                LastReadAt: null,
+                RawJson: "{}"));
         }
 
-        public Task<IReadOnlyList<GitHubNotification>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
+        public Task<IReadOnlyList<NotificationEvent>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
         {
-            IEnumerable<GitHubNotification> q = Notifications;
+            IEnumerable<NotificationEvent> q = Events;
             q = q.Where(n => DbBackedTimelineService.MatchesTab(n.Reason, filter.Tab));
 
             if (!string.IsNullOrEmpty(filter.RepositoryFullName))
@@ -197,12 +204,12 @@ public class TimelineViewModelTests
                     || n.Reason.ToString().Contains(needle, StringComparison.OrdinalIgnoreCase)
                     || (n.Subject.Type ?? string.Empty).Contains(needle, StringComparison.OrdinalIgnoreCase));
             }
-            return Task.FromResult<IReadOnlyList<GitHubNotification>>(q.OrderByDescending(n => n.UpdatedAt).ToList());
+            return Task.FromResult<IReadOnlyList<NotificationEvent>>(q.OrderByDescending(n => n.SourceUpdatedAt).ToList());
         }
 
         public Task<IReadOnlyList<RepositoryRef>> ListRepositoriesAsync(CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<RepositoryRef>>(Array.Empty<RepositoryRef>());
 
-        public IReadOnlyList<GitHubNotification> GetPlaceholderItems() => Array.Empty<GitHubNotification>();
+        public IReadOnlyList<NotificationEvent> GetPlaceholderItems() => Array.Empty<NotificationEvent>();
     }
 }

@@ -12,14 +12,14 @@ namespace Ghuboon.App.Services;
 /// older tests. Mirrors the legacy placeholder shape so the existing UI snapshot
 /// matches what Phase 1 produced.
 ///
-/// Issue #8: returns domain <see cref="GitHubNotification"/> values; the
-/// caller (TimelineViewModel) builds view-models.
+/// Event-log timeline: returns one <see cref="NotificationEvent"/> per
+/// placeholder row.
 /// </summary>
 public sealed class StubTimelineService : ITimelineService
 {
-    public Task<IReadOnlyList<GitHubNotification>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
+    public Task<IReadOnlyList<NotificationEvent>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
     {
-        return Task.FromResult<IReadOnlyList<GitHubNotification>>(GetPlaceholderItems());
+        return Task.FromResult<IReadOnlyList<NotificationEvent>>(GetPlaceholderItems());
     }
 
     public Task<IReadOnlyList<RepositoryRef>> ListRepositoriesAsync(CancellationToken ct = default)
@@ -27,20 +27,21 @@ public sealed class StubTimelineService : ITimelineService
         return Task.FromResult<IReadOnlyList<RepositoryRef>>(Array.Empty<RepositoryRef>());
     }
 
-    public IReadOnlyList<GitHubNotification> GetPlaceholderItems()
+    public IReadOnlyList<NotificationEvent> GetPlaceholderItems()
     {
         var now = DateTimeOffset.UtcNow;
-        return new List<GitHubNotification>
+        return new List<NotificationEvent>
         {
-            BuildPlaceholder("1", "octocat/hello-world", "Add CONTRIBUTING.md", NotificationReason.Review, now.AddMinutes(-3), unread: true, "PullRequest"),
-            BuildPlaceholder("2", "ochanuco/ghuboon", "Phase 1 shell scaffolding", NotificationReason.Mention, now.AddMinutes(-25), unread: true, "PullRequest"),
-            BuildPlaceholder("3", "dotnet/runtime", "Investigate AOT regression on macOS", NotificationReason.Watching, now.AddHours(-2), unread: false, "Issue"),
-            BuildPlaceholder("4", "AvaloniaUI/Avalonia", "ListBox virtualization issue", NotificationReason.MyPr, now.AddHours(-9), unread: true, "PullRequest"),
-            BuildPlaceholder("5", "ghuboon/playground", "Tune cache pruning to 30 days", NotificationReason.Assigned, now.AddDays(-1), unread: false, "Issue"),
+            BuildPlaceholder(1, "1", "octocat/hello-world", "Add CONTRIBUTING.md", NotificationReason.Review, now.AddMinutes(-3), unread: true, "PullRequest"),
+            BuildPlaceholder(2, "2", "ochanuco/ghuboon", "Phase 1 shell scaffolding", NotificationReason.Mention, now.AddMinutes(-25), unread: true, "PullRequest"),
+            BuildPlaceholder(3, "3", "dotnet/runtime", "Investigate AOT regression on macOS", NotificationReason.Watching, now.AddHours(-2), unread: false, "Issue"),
+            BuildPlaceholder(4, "4", "AvaloniaUI/Avalonia", "ListBox virtualization issue", NotificationReason.MyPr, now.AddHours(-9), unread: true, "PullRequest"),
+            BuildPlaceholder(5, "5", "ghuboon/playground", "Tune cache pruning to 30 days", NotificationReason.Assigned, now.AddDays(-1), unread: false, "Issue"),
         };
     }
 
-    private static GitHubNotification BuildPlaceholder(
+    private static NotificationEvent BuildPlaceholder(
+        long eventId,
         string threadId,
         string repo,
         string title,
@@ -49,15 +50,18 @@ public sealed class StubTimelineService : ITimelineService
         bool unread,
         string subjectType)
     {
-        return new GitHubNotification(
-            Id: $"placeholder:{threadId}",
+        return new NotificationEvent(
+            Id: eventId,
             AccountId: "placeholder",
+            NotificationId: $"placeholder:{threadId}",
             ThreadId: threadId,
             RepositoryFullName: repo,
             Subject: new NotificationSubject(subjectType, title, null, null),
             Reason: reason,
+            SourceUpdatedAt: updatedAt,
+            ObservedAt: updatedAt,
             Unread: unread,
-            UpdatedAt: updatedAt,
-            LastReadAt: null);
+            LastReadAt: null,
+            RawJson: "{}");
     }
 }

@@ -293,5 +293,59 @@ internal static class Migrations
 
                  DROP TABLE sync_states_v1;
                  """),
+
+        // ----------------------------------------------------------------
+        // Migration v3 (event log timeline):
+        //   Adds the notification_events table: append-only event log rows
+        //   that back the timeline UI. Each per-fetch observation that sees
+        //   a different upstream updated_at on a thread becomes one row, so
+        //   a PR going Open -> Draft -> Open over multiple sync windows
+        //   produces three rows rather than overwriting a single per-thread
+        //   row in the existing notifications table.
+        //
+        //   The composite FK (account_id, notification_id) -> notifications
+        //   (account_id, id) leans on the UNIQUE (account_id, id) constraint
+        //   that v2 added to notifications, and an event row is dropped via
+        //   ON DELETE CASCADE when its parent account or notification row is
+        //   removed.
+        //
+        //   Indexes:
+        //     ix_events_account_observed -> ListByAccountAsync paging.
+        //     ux_events_dedup -> guarantees TryAppend returns false for a
+        //                       repeat observation at the same upstream
+        //                       updated_at (no duplicate rows on retry).
+        new Migration(
+            Version: 3,
+            Name: "notification_events",
+            Sql: """
+                 CREATE TABLE notification_events (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   account_id TEXT NOT NULL,
+                   notification_id TEXT NOT NULL,
+                   thread_id TEXT NOT NULL,
+                   repository_full_name TEXT NOT NULL,
+                   subject_type TEXT NOT NULL,
+                   subject_title TEXT NOT NULL,
+                   subject_api_url TEXT,
+                   web_url TEXT,
+                   reason TEXT NOT NULL,
+                   source_updated_at TEXT NOT NULL,
+                   observed_at TEXT NOT NULL,
+                   unread INTEGER NOT NULL,
+                   last_read_at TEXT,
+                   raw_json TEXT NOT NULL,
+                   CONSTRAINT fk_events_account
+                     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+                   CONSTRAINT fk_events_notification
+                     FOREIGN KEY (account_id, notification_id)
+                       REFERENCES notifications(account_id, id) ON DELETE CASCADE
+                 );
+
+                 CREATE INDEX ix_events_account_observed
+                   ON notification_events(account_id, observed_at DESC);
+
+                 CREATE UNIQUE INDEX ux_events_dedup
+                   ON notification_events(account_id, notification_id, source_updated_at);
+                 """),
     };
 }

@@ -69,34 +69,44 @@ public class TimelineViewModelTests
 
     private sealed class FakeTimelineService : ITimelineService
     {
-        public Task<IReadOnlyList<GitHubNotification>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<GitHubNotification>>(GetPlaceholderItems());
+        public Task<IReadOnlyList<NotificationEvent>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<NotificationEvent>>(GetPlaceholderItems());
 
         public Task<IReadOnlyList<RepositoryRef>> ListRepositoriesAsync(CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<RepositoryRef>>(Array.Empty<RepositoryRef>());
 
-        public IReadOnlyList<GitHubNotification> GetPlaceholderItems() => new[]
+        public IReadOnlyList<NotificationEvent> GetPlaceholderItems()
         {
-            new GitHubNotification(
-                Id: "primary:a",
-                AccountId: "primary",
-                ThreadId: "a",
-                RepositoryFullName: "repo/one",
-                Subject: new NotificationSubject("PullRequest", "title 1", null, null),
-                Reason: NotificationReason.Mention,
-                Unread: true,
-                UpdatedAt: DateTimeOffset.UtcNow,
-                LastReadAt: null),
-            new GitHubNotification(
-                Id: "primary:b",
-                AccountId: "primary",
-                ThreadId: "b",
-                RepositoryFullName: "repo/two",
-                Subject: new NotificationSubject("PullRequest", "title 2", null, null),
-                Reason: NotificationReason.Watching,
-                Unread: false,
-                UpdatedAt: DateTimeOffset.UtcNow.AddHours(-1),
-                LastReadAt: null),
-        };
+            var now = DateTimeOffset.UtcNow;
+            return new[]
+            {
+                new NotificationEvent(
+                    Id: 1,
+                    AccountId: "primary",
+                    NotificationId: "primary:a",
+                    ThreadId: "a",
+                    RepositoryFullName: "repo/one",
+                    Subject: new NotificationSubject("PullRequest", "title 1", null, null),
+                    Reason: NotificationReason.Mention,
+                    SourceUpdatedAt: now,
+                    ObservedAt: now,
+                    Unread: true,
+                    LastReadAt: null,
+                    RawJson: "{}"),
+                new NotificationEvent(
+                    Id: 2,
+                    AccountId: "primary",
+                    NotificationId: "primary:b",
+                    ThreadId: "b",
+                    RepositoryFullName: "repo/two",
+                    Subject: new NotificationSubject("PullRequest", "title 2", null, null),
+                    Reason: NotificationReason.Watching,
+                    SourceUpdatedAt: now.AddHours(-1),
+                    ObservedAt: now.AddHours(-1),
+                    Unread: false,
+                    LastReadAt: null,
+                    RawJson: "{}"),
+            };
+        }
     }
 }

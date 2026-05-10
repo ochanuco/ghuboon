@@ -132,6 +132,113 @@ internal sealed class InMemoryNotificationRepository : INotificationRepository
 }
 
 /// <summary>
+/// Test-only in-memory <see cref="INotificationEventRepository"/>. Mirrors the
+/// Storage implementation: dedups on
+/// (account_id, notification_id, source_updated_at) and orders newest-first
+/// by (observed_at, id).
+/// </summary>
+internal sealed class InMemoryNotificationEventRepository : INotificationEventRepository
+{
+    private sealed record Entry(NotificationEvent Event);
+
+    private readonly object _gate = new();
+    private readonly List<Entry> _entries = new();
+    private long _nextId = 1;
+    public int AppendCallCount { get; private set; }
+    public int DedupedCount { get; private set; }
+    public int DeleteCallCount { get; private set; }
+    public int MarkReadCallCount { get; private set; }
+
+    public Task<bool> TryAppendAsync(NotificationEvent ev, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(ev);
+        lock (_gate)
+        {
+            AppendCallCount++;
+            if (_entries.Any(e => e.Event.AccountId == ev.AccountId
+                                  && e.Event.NotificationId == ev.NotificationId
+                                  && e.Event.SourceUpdatedAt == ev.SourceUpdatedAt))
+            {
+                DedupedCount++;
+                return Task.FromResult(false);
+            }
+
+            var id = _nextId++;
+            var assigned = new NotificationEvent(
+                Id: id,
+                AccountId: ev.AccountId,
+                NotificationId: ev.NotificationId,
+                ThreadId: ev.ThreadId,
+                RepositoryFullName: ev.RepositoryFullName,
+                Subject: ev.Subject,
+                Reason: ev.Reason,
+                SourceUpdatedAt: ev.SourceUpdatedAt,
+                ObservedAt: ev.ObservedAt,
+                Unread: ev.Unread,
+                LastReadAt: ev.LastReadAt,
+                RawJson: ev.RawJson);
+            _entries.Add(new Entry(assigned));
+            return Task.FromResult(true);
+        }
+    }
+
+    public Task<IReadOnlyList<NotificationEvent>> ListByAccountAsync(string accountId, int limit, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            IReadOnlyList<NotificationEvent> list = _entries
+                .Where(e => e.Event.AccountId == accountId)
+                .OrderByDescending(e => e.Event.ObservedAt)
+                .ThenByDescending(e => e.Event.Id)
+                .Take(limit)
+                .Select(e => e.Event)
+                .ToList();
+            return Task.FromResult(list);
+        }
+    }
+
+    public Task<int> MarkThreadAsReadAsync(string accountId, string notificationId, DateTimeOffset readAt, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            MarkReadCallCount++;
+            var affected = 0;
+            for (var i = 0; i < _entries.Count; i++)
+            {
+                var e = _entries[i].Event;
+                if (e.AccountId == accountId && e.NotificationId == notificationId)
+                {
+                    _entries[i] = new Entry(e with { Unread = false, LastReadAt = readAt });
+                    affected++;
+                }
+            }
+            return Task.FromResult(affected);
+        }
+    }
+
+    public Task<int> DeleteOlderThanAsync(DateTimeOffset cutoff, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            DeleteCallCount++;
+            var removed = _entries.RemoveAll(e => e.Event.ObservedAt < cutoff);
+            return Task.FromResult(removed);
+        }
+    }
+
+    public int Count
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _entries.Count;
+            }
+        }
+    }
+}
+
+/// <summary>
 /// Test-only in-memory <see cref="ISyncStateRepository"/>.
 /// </summary>
 internal sealed class InMemorySyncStateRepository : ISyncStateRepository

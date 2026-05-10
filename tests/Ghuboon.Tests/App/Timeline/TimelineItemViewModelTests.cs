@@ -32,6 +32,7 @@ public class TimelineItemViewModelTests
 
         var ctx = new TimelineItemContext(
             Repository: repo,
+            EventRepository: null,
             Api: api,
             Browser: browser,
             Clipboard: clip,
