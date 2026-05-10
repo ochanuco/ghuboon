@@ -12,6 +12,12 @@ namespace Ghuboon.Core.Domain;
 /// <param name="Unread">True while the thread is unread for the user.</param>
 /// <param name="UpdatedAt">Last time the thread changed on GitHub (server clock).</param>
 /// <param name="LastReadAt">Last time the user marked it read locally; null when never read.</param>
+/// <param name="ActorLogin">
+/// Optional GitHub login of the user/bot whose action produced this thread
+/// (e.g. <c>"coderabbitai[bot]"</c>). The notifications listing API does not
+/// include this field, so it is lazily back-filled from per-thread fetches
+/// and may be null for legacy rows.
+/// </param>
 /// <exception cref="ArgumentNullException">
 /// Thrown when any of <paramref name="Id"/>, <paramref name="AccountId"/>,
 /// <paramref name="ThreadId"/>, <paramref name="RepositoryFullName"/>, or
@@ -33,7 +39,8 @@ public sealed record GitHubNotification
         NotificationReason Reason,
         bool Unread,
         DateTimeOffset UpdatedAt,
-        DateTimeOffset? LastReadAt)
+        DateTimeOffset? LastReadAt,
+        string? ActorLogin = null)
     {
         ArgumentNullException.ThrowIfNull(Id);
         ArgumentNullException.ThrowIfNull(AccountId);
@@ -104,6 +111,7 @@ public sealed record GitHubNotification
         this.Unread = Unread;
         this.UpdatedAt = UpdatedAt;
         this.LastReadAt = LastReadAt;
+        this.ActorLogin = ActorLogin;
     }
 
     // Issue #35: Id, AccountId, ThreadId, and RepositoryFullName are part of
@@ -122,4 +130,12 @@ public sealed record GitHubNotification
     public bool Unread { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
     public DateTimeOffset? LastReadAt { get; init; }
+    /// <summary>
+    /// Optional login of the actor whose action produced the latest observation
+    /// of this thread. The notifications listing API does not surface this, so
+    /// it is populated lazily on row selection (per-thread fetch) and persisted
+    /// back so subsequent sessions see the real author/bot rather than the
+    /// repo owner stop-gap. Null until the lazy backfill runs.
+    /// </summary>
+    public string? ActorLogin { get; init; }
 }

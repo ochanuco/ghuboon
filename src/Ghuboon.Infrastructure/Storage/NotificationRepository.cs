@@ -19,6 +19,7 @@ internal sealed class NotificationRow
     public long Unread { get; set; }
     public string UpdatedAt { get; set; } = string.Empty;
     public string? LastReadAt { get; set; }
+    public string? ActorLogin { get; set; }
 }
 
 /// <summary>
@@ -50,17 +51,23 @@ public sealed class NotificationRepository : INotificationRepository
         // Issue #25: COALESCE incoming last_read_at with the existing column
         // value so a sync that re-upserts a remote-still-unread notification
         // (last_read_at = null) does not clobber a locally-set read marker.
+        // actor_login uses the same COALESCE(excluded, existing) trick as
+        // last_read_at so a sync upsert that doesn't know the actor (the
+        // listing API never includes it) can't clobber a value the detail
+        // pane lazily back-filled. The detail-pane back-fill goes through
+        // SetActorLoginAsync rather than UpsertAsync, so this guard is the
+        // belt-and-braces backstop for future call sites.
         const string sql = """
                            INSERT INTO notifications (
                                id, account_id, thread_id, repository_full_name,
                                subject_type, subject_title, subject_api_url, web_url,
                                reason, unread, updated_at, last_read_at,
-                               raw_json, created_at, synced_at)
+                               raw_json, created_at, synced_at, actor_login)
                            VALUES (
                                @id, @accountId, @threadId, @repositoryFullName,
                                @subjectType, @subjectTitle, @subjectApiUrl, @webUrl,
                                @reason, @unread, @updatedAt, @lastReadAt,
-                               @rawJson, @createdAt, @syncedAt)
+                               @rawJson, @createdAt, @syncedAt, @actorLogin)
                            ON CONFLICT(id) DO UPDATE SET
                                account_id = excluded.account_id,
                                thread_id = excluded.thread_id,
@@ -74,7 +81,8 @@ public sealed class NotificationRepository : INotificationRepository
                                updated_at = excluded.updated_at,
                                last_read_at = COALESCE(excluded.last_read_at, last_read_at),
                                raw_json = excluded.raw_json,
-                               synced_at = excluded.synced_at;
+                               synced_at = excluded.synced_at,
+                               actor_login = COALESCE(excluded.actor_login, actor_login);
                            """;
 
         await connection.ExecuteAsync(new CommandDefinition(
@@ -96,6 +104,7 @@ public sealed class NotificationRepository : INotificationRepository
                 rawJson = rawJson,
                 createdAt = syncedAt.ToUniversalTime().ToString("O"),
                 syncedAt = syncedAt.ToUniversalTime().ToString("O"),
+                actorLogin = notification.ActorLogin,
             },
             cancellationToken: ct)).ConfigureAwait(false);
     }
@@ -112,7 +121,8 @@ public sealed class NotificationRepository : INotificationRepository
                                   subject_type AS SubjectType, subject_title AS SubjectTitle,
                                   subject_api_url AS SubjectApiUrl, web_url AS WebUrl,
                                   reason AS Reason, unread AS Unread,
-                                  updated_at AS UpdatedAt, last_read_at AS LastReadAt
+                                  updated_at AS UpdatedAt, last_read_at AS LastReadAt,
+                                  actor_login AS ActorLogin
                            FROM notifications
                            WHERE id = @id;
                            """;
@@ -144,7 +154,8 @@ public sealed class NotificationRepository : INotificationRepository
                                   subject_type AS SubjectType, subject_title AS SubjectTitle,
                                   subject_api_url AS SubjectApiUrl, web_url AS WebUrl,
                                   reason AS Reason, unread AS Unread,
-                                  updated_at AS UpdatedAt, last_read_at AS LastReadAt
+                                  updated_at AS UpdatedAt, last_read_at AS LastReadAt,
+                                  actor_login AS ActorLogin
                            FROM notifications
                            WHERE account_id = @accountId
                            ORDER BY datetime(updated_at) DESC;
@@ -176,6 +187,29 @@ public sealed class NotificationRepository : INotificationRepository
             cancellationToken: ct)).ConfigureAwait(false);
     }
 
+    public async Task<int> SetActorLoginAsync(string id, string actorLogin, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        ArgumentException.ThrowIfNullOrWhiteSpace(actorLogin);
+
+        await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
+
+        // Lazy backfill from the detail-pane fetch: only update the matching
+        // row, and only when the row exists. We don't COALESCE here because
+        // the caller (TimelineItemViewModel) already gates the call on a
+        // non-null author login it just resolved from a per-thread fetch —
+        // overwriting any prior value with the freshest signal is correct.
+        const string sql = """
+                           UPDATE notifications
+                              SET actor_login = @actorLogin
+                            WHERE id = @id;
+                           """;
+        return await connection.ExecuteAsync(new CommandDefinition(
+            sql,
+            new { id, actorLogin },
+            cancellationToken: ct)).ConfigureAwait(false);
+    }
+
     private static GitHubNotification Map(NotificationRow row)
     {
         var subject = new NotificationSubject(row.SubjectType, row.SubjectTitle, row.SubjectApiUrl, row.WebUrl);
@@ -192,7 +226,8 @@ public sealed class NotificationRepository : INotificationRepository
             reason,
             row.Unread != 0,
             DateTimeOffset.Parse(row.UpdatedAt, null, DateTimeStyles.RoundtripKind),
-            ParseNullableDate(row.LastReadAt));
+            ParseNullableDate(row.LastReadAt),
+            row.ActorLogin);
     }
 
     private static DateTimeOffset? ParseNullableDate(string? value) =>

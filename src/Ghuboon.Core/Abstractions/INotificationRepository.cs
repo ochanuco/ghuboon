@@ -25,4 +25,12 @@ public interface INotificationRepository
     /// <paramref name="cutoff"/>. Returns the number of rows removed.
     /// </summary>
     Task<int> DeleteOlderThanAsync(DateTimeOffset cutoff, CancellationToken ct = default);
+
+    /// <summary>
+    /// Lazily backfill the per-thread actor login (e.g. <c>"coderabbitai[bot]"</c>)
+    /// for the notification with the given id. Used when a row is selected and
+    /// the detail-pane fetch surfaces the latest comment author. Updates only
+    /// the matching row and returns the number of rows affected (0 or 1).
+    /// </summary>
+    Task<int> SetActorLoginAsync(string id, string actorLogin, CancellationToken ct = default);
 }

@@ -100,6 +100,17 @@ public partial class TimelineItemViewModel : ViewModelBase
     [ObservableProperty]
     private string? _bodyAuthorLogin;
 
+    /// <summary>
+    /// Per-event GitHub login of the actor whose action produced the row
+    /// (e.g. <c>"coderabbitai[bot]"</c>). Hydrated from the persisted event /
+    /// notification snapshot, then lazily back-filled on row selection when
+    /// the body fetch surfaces the latest comment author. The UI prefers this
+    /// over <see cref="OwnerLogin"/> via <see cref="DisplayUserLogin"/>.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DisplayUserLogin))]
+    private string? _actorLogin;
+
     private bool _bodyAttempted;
 
     /// <summary>
@@ -129,6 +140,7 @@ public partial class TimelineItemViewModel : ViewModelBase
         SubjectApiUrl = source.Subject.ApiUrl;
         UpdatedAt = source.UpdatedAt;
         _unread = source.Unread;
+        _actorLogin = source.ActorLogin;
     }
 
     /// <summary>
@@ -164,6 +176,7 @@ public partial class TimelineItemViewModel : ViewModelBase
         // event log (not when our sync wrote the row).
         UpdatedAt = source.SourceUpdatedAt;
         _unread = source.Unread;
+        _actorLogin = source.ActorLogin;
     }
 
     /// <summary>
@@ -219,6 +232,15 @@ public partial class TimelineItemViewModel : ViewModelBase
             return slash > 0 ? RepositoryFullName![..slash] : (RepositoryFullName ?? string.Empty);
         }
     }
+
+    /// <summary>
+    /// What the timeline's User column actually shows. Prefers the per-event
+    /// <see cref="ActorLogin"/> when known (e.g. <c>"coderabbitai[bot]"</c>),
+    /// falls back to <see cref="OwnerLogin"/> for cold-cache rows that
+    /// haven't been selected yet (the listing API doesn't include the actor).
+    /// </summary>
+    public string DisplayUserLogin =>
+        string.IsNullOrEmpty(ActorLogin) ? OwnerLogin : ActorLogin!;
 
     /// <summary>
     /// Numeric local autoincrement id of the underlying notification_events
@@ -501,6 +523,44 @@ public partial class TimelineItemViewModel : ViewModelBase
 
             Body = StripHtmlComments(content);
             BodyAuthorLogin = authorLogin;
+
+            // Persist the resolved actor login so the timeline's User column
+            // shows the real author/bot (e.g. @coderabbitai[bot]) instead of
+            // the repo owner stop-gap, both on the current row and on every
+            // sibling event for the same thread (so the next session and
+            // cold-cache rows remember it). We only write when the column is
+            // currently null and the fetch produced a non-empty login —
+            // never persist falsy data and never overwrite a value the user
+            // (or a previous fetch) already pinned.
+            if (!string.IsNullOrEmpty(authorLogin) && string.IsNullOrEmpty(ActorLogin))
+            {
+                ActorLogin = authorLogin;
+
+                if (_ctx.EventRepository is { } evRepo && EventLocalId is { } eventId)
+                {
+                    try
+                    {
+                        await evRepo.SetActorLoginAsync(eventId, authorLogin!, ct).ConfigureAwait(true);
+                    }
+                    catch (Exception ex)
+                    {
+                        _ctx.Log?.Information(ex, "Persisting actor_login for event {EventId} failed (non-fatal)", eventId);
+                    }
+                }
+
+                if (_ctx.Repository is { } notifRepo && !string.IsNullOrEmpty(NotificationId))
+                {
+                    try
+                    {
+                        await notifRepo.SetActorLoginAsync(NotificationId, authorLogin!, ct).ConfigureAwait(true);
+                    }
+                    catch (Exception ex)
+                    {
+                        _ctx.Log?.Information(ex, "Persisting actor_login for notification {NotificationId} failed (non-fatal)", NotificationId);
+                    }
+                }
+            }
+
             BodyLoaded = true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)

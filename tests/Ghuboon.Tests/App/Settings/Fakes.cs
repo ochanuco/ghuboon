@@ -77,6 +77,9 @@ internal sealed class FakeNotificationRepository : INotificationRepository
         DeleteOlderThanCalls.Add(cutoff);
         return Task.FromResult(RowsToReturn);
     }
+
+    public Task<int> SetActorLoginAsync(string id, string actorLogin, CancellationToken ct = default)
+        => Task.FromResult(0);
 }
 
 internal sealed class FakeGitHubApiClient : IGitHubApiClient

@@ -53,6 +53,14 @@ internal sealed class FakeNotificationRepository : INotificationRepository
     {
         return Task.FromResult(0);
     }
+
+    public Task<int> SetActorLoginAsync(string id, string actorLogin, CancellationToken ct = default)
+    {
+        var idx = Notifications.FindIndex(n => n.Id == id);
+        if (idx < 0) return Task.FromResult(0);
+        Notifications[idx] = Notifications[idx] with { ActorLogin = actorLogin };
+        return Task.FromResult(1);
+    }
 }
 
 /// <summary>
@@ -144,6 +152,19 @@ internal sealed class FakeNotificationEventRepository : INotificationEventReposi
             .DefaultIfEmpty()
             .Max();
         return Task.FromResult(max);
+    }
+
+    public Task<int> SetActorLoginAsync(long eventId, string actorLogin, CancellationToken ct = default)
+    {
+        for (var i = 0; i < Events.Count; i++)
+        {
+            if (Events[i].Id == eventId)
+            {
+                Events[i] = Events[i] with { ActorLogin = actorLogin };
+                return Task.FromResult(1);
+            }
+        }
+        return Task.FromResult(0);
     }
 }
 

@@ -386,5 +386,26 @@ internal static class Migrations
                    raw_json
                  FROM notifications;
                  """),
+
+        // ----------------------------------------------------------------
+        // Migration v5 (per-event actor login):
+        //   The notifications listing API does not include an actor field, so
+        //   the timeline used to fall back to the repo owner login for the
+        //   "User" column. Comments by bots (e.g. @coderabbitai[bot]) showed
+        //   up as the repo owner, which is misleading. To support a lazy
+        //   per-row backfill on selection, both notifications and
+        //   notification_events grow a nullable actor_login column. SQLite
+        //   permits ALTER TABLE ADD COLUMN for nullable columns without the
+        //   rename/copy/drop dance, so we stay simple here. Legacy rows keep
+        //   actor_login = NULL until the detail-pane fetch lazily backfills
+        //   them; the UI falls back to the repo owner login when the column
+        //   is null.
+        new Migration(
+            Version: 5,
+            Name: "actor_login_columns",
+            Sql: """
+                 ALTER TABLE notifications ADD COLUMN actor_login TEXT;
+                 ALTER TABLE notification_events ADD COLUMN actor_login TEXT;
+                 """),
     };
 }

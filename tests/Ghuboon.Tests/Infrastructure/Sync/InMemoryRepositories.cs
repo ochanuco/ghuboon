@@ -123,6 +123,17 @@ internal sealed class InMemoryNotificationRepository : INotificationRepository
         return Task.FromResult(stale.Count);
     }
 
+    public Task<int> SetActorLoginAsync(string id, string actorLogin, CancellationToken ct = default)
+    {
+        if (!_notifs.TryGetValue(id, out var entry))
+        {
+            return Task.FromResult(0);
+        }
+        var updated = entry.Notification with { ActorLogin = actorLogin };
+        _notifs[id] = entry with { Notification = updated };
+        return Task.FromResult(1);
+    }
+
     public int Count => _notifs.Count;
 
     public void SeedWithSyncedAt(GitHubNotification notification, DateTimeOffset syncedAt)
@@ -236,6 +247,23 @@ internal sealed class InMemoryNotificationEventRepository : INotificationEventRe
                 .DefaultIfEmpty()
                 .Max();
             return Task.FromResult(max);
+        }
+    }
+
+    public Task<int> SetActorLoginAsync(long eventId, string actorLogin, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            for (var i = 0; i < _entries.Count; i++)
+            {
+                var ev = _entries[i].Event;
+                if (ev.Id == eventId)
+                {
+                    _entries[i] = new Entry(ev with { ActorLogin = actorLogin });
+                    return Task.FromResult(1);
+                }
+            }
+            return Task.FromResult(0);
         }
     }
 

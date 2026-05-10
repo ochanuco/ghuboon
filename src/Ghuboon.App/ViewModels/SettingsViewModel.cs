@@ -157,5 +157,8 @@ public partial class SettingsViewModel : ViewModelBase
 
         public Task<int> DeleteOlderThanAsync(DateTimeOffset cutoff, CancellationToken ct = default)
             => Task.FromResult(0);
+
+        public Task<int> SetActorLoginAsync(string id, string actorLogin, CancellationToken ct = default)
+            => Task.FromResult(0);
     }
 }

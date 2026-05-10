@@ -234,6 +234,59 @@ public class NotificationEventRepositoryTests
     }
 
     [Fact]
+    public async Task SetActorLogin_roundtrips_value_for_matching_event()
+    {
+        // The detail-pane fetch lazily backfills actor_login per row. Verify
+        // a freshly-inserted event starts with null and that a subsequent
+        // SetActorLoginAsync with the assigned event id roundtrips through
+        // the column.
+        await using var temp = new TempDatabase(seedNotifications: false);
+        await SeedNotificationAsync(temp, "acct-1:thread-1", "acct-1");
+        var repo = new NotificationEventRepository(temp.Factory);
+
+        Assert.True(await repo.TryAppendAsync(SampleEvent()));
+        var initial = (await repo.ListByAccountAsync("acct-1", 100)).Single();
+        Assert.Null(initial.ActorLogin);
+
+        var affected = await repo.SetActorLoginAsync(initial.Id, "coderabbitai[bot]");
+        Assert.Equal(1, affected);
+
+        var refreshed = (await repo.ListByAccountAsync("acct-1", 100)).Single();
+        Assert.Equal("coderabbitai[bot]", refreshed.ActorLogin);
+    }
+
+    [Fact]
+    public async Task SetActorLogin_does_not_affect_other_event_rows()
+    {
+        // Per-row backfill must not splash onto sibling events for the same
+        // thread or for unrelated threads — the persistence path is by
+        // event id, not by notification id, so the call only updates one
+        // row.
+        await using var temp = new TempDatabase(seedNotifications: false);
+        await SeedNotificationAsync(temp, "acct-1:thread-1", "acct-1");
+        await SeedNotificationAsync(temp, "acct-1:thread-other", "acct-1");
+        var repo = new NotificationEventRepository(temp.Factory);
+
+        var t0 = new DateTimeOffset(2026, 5, 1, 0, 0, 0, TimeSpan.Zero);
+        Assert.True(await repo.TryAppendAsync(SampleEvent(sourceUpdatedAt: t0)));
+        Assert.True(await repo.TryAppendAsync(SampleEvent(sourceUpdatedAt: t0.AddHours(1))));
+        Assert.True(await repo.TryAppendAsync(SampleEvent(notificationId: "acct-1:thread-other", sourceUpdatedAt: t0)));
+
+        var all = (await repo.ListByAccountAsync("acct-1", 100)).ToList();
+        var target = all.First(e => e.NotificationId == "acct-1:thread-1" && e.SourceUpdatedAt == t0);
+
+        var affected = await repo.SetActorLoginAsync(target.Id, "coderabbitai[bot]");
+        Assert.Equal(1, affected);
+
+        var refreshed = (await repo.ListByAccountAsync("acct-1", 100)).ToList();
+        var updated = refreshed.Single(e => e.Id == target.Id);
+        Assert.Equal("coderabbitai[bot]", updated.ActorLogin);
+
+        // Every other row stays null.
+        Assert.All(refreshed.Where(e => e.Id != target.Id), e => Assert.Null(e.ActorLogin));
+    }
+
+    [Fact]
     public async Task TryAppend_normalizes_timestamps_to_utc()
     {
         // Production stores timestamps as UTC ISO-8601 so lexical ordering

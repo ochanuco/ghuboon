@@ -136,4 +136,59 @@ public class NotificationRepositoryTests
 
         Assert.Null(await repo.GetByIdAsync("missing"));
     }
+
+    [Fact]
+    public async Task SetActorLogin_roundtrips_for_matching_id_and_leaves_others_alone()
+    {
+        // Sync upserts cannot populate actor_login (the listing API doesn't
+        // include it), so the column starts null. The detail-pane fetch
+        // lazily back-fills it via SetActorLoginAsync. Verify the round trip
+        // and that unrelated rows are untouched.
+        await using var temp = new TempDatabase(seedNotifications: false);
+        var repo = new NotificationRepository(temp.Factory);
+        var syncedAt = new DateTimeOffset(2026, 5, 9, 12, 0, 0, TimeSpan.Zero);
+
+        var target = SampleNotification(id: "acct-1:thread-1");
+        var sibling = SampleNotification(id: "acct-1:thread-2");
+
+        await repo.UpsertAsync(target, "{}", syncedAt);
+        await repo.UpsertAsync(sibling, "{}", syncedAt);
+
+        Assert.Null((await repo.GetByIdAsync(target.Id))!.ActorLogin);
+
+        var affected = await repo.SetActorLoginAsync(target.Id, "coderabbitai[bot]");
+        Assert.Equal(1, affected);
+
+        var updated = await repo.GetByIdAsync(target.Id);
+        Assert.NotNull(updated);
+        Assert.Equal("coderabbitai[bot]", updated!.ActorLogin);
+
+        var unchanged = await repo.GetByIdAsync(sibling.Id);
+        Assert.NotNull(unchanged);
+        Assert.Null(unchanged!.ActorLogin);
+    }
+
+    [Fact]
+    public async Task Upsert_does_not_clobber_actor_login_when_incoming_is_null()
+    {
+        // Once the detail pane has back-filled actor_login, a subsequent
+        // sync upsert (which always passes ActorLogin = null because the
+        // listing API doesn't carry it) must not erase the cached value.
+        // The COALESCE in UpsertAsync's ON CONFLICT clause guarantees this.
+        await using var temp = new TempDatabase(seedNotifications: false);
+        var repo = new NotificationRepository(temp.Factory);
+        var syncedAt = new DateTimeOffset(2026, 5, 9, 12, 0, 0, TimeSpan.Zero);
+
+        var notif = SampleNotification();
+        await repo.UpsertAsync(notif, "{}", syncedAt);
+        await repo.SetActorLoginAsync(notif.Id, "coderabbitai[bot]");
+
+        // Re-upsert (e.g. next sync) with no actor_login; the value must
+        // survive.
+        await repo.UpsertAsync(notif, "{}", syncedAt.AddMinutes(5));
+
+        var read = await repo.GetByIdAsync(notif.Id);
+        Assert.NotNull(read);
+        Assert.Equal("coderabbitai[bot]", read!.ActorLogin);
+    }
 }
