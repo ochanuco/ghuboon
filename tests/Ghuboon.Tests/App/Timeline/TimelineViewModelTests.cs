@@ -84,6 +84,51 @@ public class TimelineViewModelTests
     }
 
     [Fact]
+    public void ItemContextFactory_PlaceholderPath_InvokedPerRow()
+    {
+        // Issue #43: the constructor's placeholder fast-path must also call
+        // the factory per-row, not once and reused.
+        var stub = new StubTimelineService();
+        var placeholders = stub.GetPlaceholderItems();
+        var factoryCalls = 0;
+        _ = new TimelineViewModel(stub, () =>
+        {
+            factoryCalls++;
+            return TimelineItemContext.Empty;
+        });
+
+        Assert.Equal(placeholders.Count, factoryCalls);
+        Assert.True(factoryCalls > 0, "StubTimelineService should yield at least one placeholder.");
+    }
+
+    [Fact]
+    public async Task ItemContextFactory_IsInvokedPerRow()
+    {
+        // Issue #43: each TimelineItemViewModel must get its own
+        // TimelineItemContext, so the factory is called once per row, not once
+        // per load.
+        var t0 = new DateTimeOffset(2026, 5, 9, 12, 0, 0, TimeSpan.Zero);
+        var fake = new FakeTimelineService();
+        fake.AddNotification(NotificationReason.Mention, "a/r", "row-1", updatedAt: t0);
+        fake.AddNotification(NotificationReason.Mention, "a/r", "row-2", updatedAt: t0.AddMinutes(-1));
+        fake.AddNotification(NotificationReason.Mention, "a/r", "row-3", updatedAt: t0.AddMinutes(-2));
+
+        var factoryCalls = 0;
+        var vm = new TimelineViewModel(fake, () =>
+        {
+            factoryCalls++;
+            return TimelineItemContext.Empty;
+        });
+
+        await vm.ReloadAsync();
+
+        Assert.Equal(3, vm.Items.Count);
+        // 1 invocation in the constructor (placeholder fast-path returns 0 rows
+        // for FakeTimelineService) + 3 invocations during ReloadAsync.
+        Assert.Equal(3, factoryCalls);
+    }
+
+    [Fact]
     public async Task UnreadCount_TracksItemReadState()
     {
         var t0 = new DateTimeOffset(2026, 5, 9, 12, 0, 0, TimeSpan.Zero);
