@@ -166,6 +166,19 @@ internal sealed class FakeNotificationEventRepository : INotificationEventReposi
         }
         return Task.FromResult(0);
     }
+
+    public Task<int> SetBodyAsync(long eventId, string? body, string? bodyAuthorLogin, CancellationToken ct = default)
+    {
+        for (var i = 0; i < Events.Count; i++)
+        {
+            if (Events[i].Id == eventId)
+            {
+                Events[i] = Events[i] with { Body = body, BodyAuthorLogin = bodyAuthorLogin };
+                return Task.FromResult(1);
+            }
+        }
+        return Task.FromResult(0);
+    }
 }
 
 internal sealed class FakeRepositoryRepository : IRepositoryRepository

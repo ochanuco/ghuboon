@@ -183,6 +183,16 @@ public partial class TimelineItemViewModel : ViewModelBase
         UpdatedAt = source.SourceUpdatedAt;
         _unread = source.Unread;
         _actorLogin = source.ActorLogin;
+        // Hydrate from the per-event body cache (Migration v8). When the
+        // event already carries a fetched body we render from cache and
+        // skip the API call entirely on the next selection.
+        if (!string.IsNullOrEmpty(source.Body))
+        {
+            _body = source.Body;
+            _bodyAuthorLogin = source.BodyAuthorLogin;
+            _bodyLoaded = true;
+            _bodyAttempted = true;
+        }
     }
 
     /// <summary>
@@ -560,6 +570,25 @@ public partial class TimelineItemViewModel : ViewModelBase
 
             Body = StripHtmlComments(content);
             BodyAuthorLogin = bodyAuthor;
+
+            // Persist the body to the per-event cache so subsequent renders
+            // (next reload, future sessions) read from the local DB and
+            // don't re-hit the GitHub API for the same row. Only writes
+            // when we actually got content; an empty fetch leaves the row
+            // null so the next selection retries.
+            if (!string.IsNullOrEmpty(Body)
+                && _ctx.EventRepository is { } bodyRepo
+                && EventLocalId is { } bodyEventId)
+            {
+                try
+                {
+                    await bodyRepo.SetBodyAsync(bodyEventId, Body, BodyAuthorLogin, ct).ConfigureAwait(true);
+                }
+                catch (Exception ex)
+                {
+                    _ctx.Log?.Information(ex, "Persisting body for event {EventId} failed (non-fatal)", bodyEventId);
+                }
+            }
 
             // ActorLogin = the actor of THIS row's content (commenter for
             // Comment kind, creator for PR/Issue kind). Always overwrite

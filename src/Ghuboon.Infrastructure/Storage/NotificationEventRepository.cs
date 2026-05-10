@@ -24,6 +24,8 @@ internal sealed class NotificationEventRow
     public string RawJson { get; set; } = string.Empty;
     public string? ActorLogin { get; set; }
     public string? LatestCommentUrl { get; set; }
+    public string? Body { get; set; }
+    public string? BodyAuthorLogin { get; set; }
 }
 
 /// <summary>
@@ -129,7 +131,9 @@ public sealed class NotificationEventRepository : INotificationEventRepository
                                   last_read_at AS LastReadAt,
                                   raw_json AS RawJson,
                                   actor_login AS ActorLogin,
-                                  latest_comment_url AS LatestCommentUrl
+                                  latest_comment_url AS LatestCommentUrl,
+                                  body AS Body,
+                                  body_author_login AS BodyAuthorLogin
                            FROM (
                              SELECT *
                              FROM notification_events
@@ -260,6 +264,33 @@ public sealed class NotificationEventRepository : INotificationEventRepository
             cancellationToken: ct)).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Persists the just-fetched body content (and optional author login)
+    /// for a single event row so subsequent renders can render from cache
+    /// instead of re-hitting the GitHub API. The columns are nullable: a
+    /// no-content fetch leaves them null and the next selection re-tries.
+    /// </summary>
+    public async Task<int> SetBodyAsync(long eventId, string? body, string? bodyAuthorLogin, CancellationToken ct = default)
+    {
+        if (eventId <= 0)
+        {
+            return 0;
+        }
+
+        await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
+
+        const string sql = """
+                           UPDATE notification_events
+                              SET body = @body,
+                                  body_author_login = @bodyAuthorLogin
+                            WHERE id = @eventId;
+                           """;
+        return await connection.ExecuteAsync(new CommandDefinition(
+            sql,
+            new { eventId, body, bodyAuthorLogin },
+            cancellationToken: ct)).ConfigureAwait(false);
+    }
+
     private static NotificationEvent Map(NotificationEventRow row)
     {
         var subject = new NotificationSubject(row.SubjectType, row.SubjectTitle, row.SubjectApiUrl, row.WebUrl, row.LatestCommentUrl);
@@ -280,7 +311,9 @@ public sealed class NotificationEventRepository : INotificationEventRepository
             Unread: row.Unread != 0,
             LastReadAt: ParseNullableDate(row.LastReadAt),
             RawJson: row.RawJson ?? string.Empty,
-            ActorLogin: row.ActorLogin);
+            ActorLogin: row.ActorLogin,
+            Body: row.Body,
+            BodyAuthorLogin: row.BodyAuthorLogin);
     }
 
     private static DateTimeOffset? ParseNullableDate(string? value) =>

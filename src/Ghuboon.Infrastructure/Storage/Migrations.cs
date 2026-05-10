@@ -443,5 +443,23 @@ internal static class Migrations
                  CREATE INDEX IF NOT EXISTS ix_events_account_notification
                    ON notification_events(account_id, notification_id);
                  """),
+
+        // ----------------------------------------------------------------
+        // Migration v8 (per-event body cache):
+        //   The detail pane fetched the body (PR/Issue description or
+        //   comment text) on every row selection. Each Reload re-creates
+        //   the row VMs from event_repository data, flushing the in-memory
+        //   _bodyAttempted guard, so reopening the same row after a sync
+        //   re-hit the GitHub API. Persisting the body on the event row
+        //   means the detail pane renders from cache after the first
+        //   fetch and only re-fetches when the row is genuinely new
+        //   (next event on the thread → new event row → no cached body).
+        new Migration(
+            Version: 8,
+            Name: "event_body_cache_columns",
+            Sql: """
+                 ALTER TABLE notification_events ADD COLUMN body TEXT;
+                 ALTER TABLE notification_events ADD COLUMN body_author_login TEXT;
+                 """),
     };
 }

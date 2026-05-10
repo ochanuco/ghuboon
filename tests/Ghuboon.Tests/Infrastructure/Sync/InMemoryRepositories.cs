@@ -267,6 +267,23 @@ internal sealed class InMemoryNotificationEventRepository : INotificationEventRe
         }
     }
 
+    public Task<int> SetBodyAsync(long eventId, string? body, string? bodyAuthorLogin, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            for (var i = 0; i < _entries.Count; i++)
+            {
+                var ev = _entries[i].Event;
+                if (ev.Id == eventId)
+                {
+                    _entries[i] = new Entry(ev with { Body = body, BodyAuthorLogin = bodyAuthorLogin });
+                    return Task.FromResult(1);
+                }
+            }
+            return Task.FromResult(0);
+        }
+    }
+
     public int Count
     {
         get

@@ -55,7 +55,9 @@ public sealed record NotificationEvent
         bool Unread,
         DateTimeOffset? LastReadAt,
         string RawJson,
-        string? ActorLogin = null)
+        string? ActorLogin = null,
+        string? Body = null,
+        string? BodyAuthorLogin = null)
     {
         ArgumentNullException.ThrowIfNull(AccountId);
         ArgumentNullException.ThrowIfNull(NotificationId);
@@ -131,6 +133,8 @@ public sealed record NotificationEvent
         this.LastReadAt = LastReadAt;
         this.RawJson = RawJson;
         this.ActorLogin = ActorLogin;
+        this.Body = Body;
+        this.BodyAuthorLogin = BodyAuthorLogin;
     }
 
     // Identity-bearing fields are private init to mirror GitHubNotification:
@@ -158,4 +162,21 @@ public sealed record NotificationEvent
     /// author/bot rather than the repo owner stop-gap.
     /// </summary>
     public string? ActorLogin { get; init; }
+
+    /// <summary>
+    /// Cached body content (PR/Issue description for description-mode rows,
+    /// comment text for comment-mode rows). Populated lazily when the user
+    /// selects the row and the detail pane fetches the body, then persisted
+    /// so subsequent sessions / re-renders don't re-hit the GitHub API for
+    /// the same row. Null until first fetch (or when fetch failed).
+    /// </summary>
+    public string? Body { get; init; }
+
+    /// <summary>
+    /// Login of the user/bot whose body content is currently shown
+    /// (PR/Issue creator for description rows, commenter for comment rows).
+    /// Stored alongside <see cref="Body"/> so the detail-pane attribution
+    /// survives across sessions without an extra fetch.
+    /// </summary>
+    public string? BodyAuthorLogin { get; init; }
 }
