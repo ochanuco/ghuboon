@@ -204,8 +204,11 @@ public partial class App : Application
             var count = mainVm.UnreadCount;
             Dispatcher.UIThread.Post(() => _menuBar?.UpdateUnreadCount(count));
         };
-        var initialCount = mainVm.UnreadCount;
-        Dispatcher.UIThread.Post(() => _menuBar?.UpdateUnreadCount(initialCount));
+        // Issue #43: read UnreadCount inside the lambda so the posted update
+        // uses the latest value rather than a stale snapshot captured here.
+        // If a UnreadCountChanged event fires between this line and the post
+        // running on the UI thread, the lambda observes the up-to-date value.
+        Dispatcher.UIThread.Post(() => _menuBar?.UpdateUnreadCount(mainVm.UnreadCount));
 
         // Close-to-hide on macOS so the app keeps living in the menu bar.
         // On other platforms _menuBar is a NoOpMenuBarHost; closing should
