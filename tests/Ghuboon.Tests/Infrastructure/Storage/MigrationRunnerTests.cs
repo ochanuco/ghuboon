@@ -15,10 +15,10 @@ public class MigrationRunnerTests
 
         var versions = await connection.QueryAsync<int>(
             "SELECT version FROM _schema_migrations ORDER BY version;");
-        // Issue #32 / #37: migration v2 adds the composite primary key on
-        // notification_local_states and re-applies FK constraints. Both
-        // versions are recorded after a fresh open.
-        Assert.Equal(new[] { 1, 2 }, versions);
+        // Migration v3 adds the notification_events table that backs the
+        // event-log timeline; v1 and v2 establish the rest of the schema and
+        // FK constraints. All three versions land on a fresh open.
+        Assert.Equal(new[] { 1, 2, 3 }, versions);
 
         var tableNames = (await connection.QueryAsync<string>(
                 "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"))
@@ -28,6 +28,7 @@ public class MigrationRunnerTests
         Assert.Contains("repositories", tableNames);
         Assert.Contains("notifications", tableNames);
         Assert.Contains("notification_local_states", tableNames);
+        Assert.Contains("notification_events", tableNames);
         Assert.Contains("sync_states", tableNames);
         Assert.Contains("app_settings", tableNames);
         Assert.Contains("_schema_migrations", tableNames);
@@ -56,7 +57,7 @@ public class MigrationRunnerTests
                 "SELECT version FROM _schema_migrations ORDER BY version;"))
             .ToList();
 
-        Assert.Equal(new[] { 1, 2 }, versions);
+        Assert.Equal(new[] { 1, 2, 3 }, versions);
     }
 
     [Fact]
@@ -380,6 +381,7 @@ public class MigrationRunnerTests
             // Wipe whatever the runner just applied.
             await raw.ExecuteAsync(
                 """
+                DROP TABLE IF EXISTS notification_events;
                 DROP TABLE IF EXISTS notification_local_states;
                 DROP TABLE IF EXISTS notifications;
                 DROP TABLE IF EXISTS sync_states;
@@ -477,12 +479,13 @@ public class MigrationRunnerTests
         }
 
         // Now run the full migration runner against the legacy DB. It should
-        // detect that v1 is already recorded and apply only v2.
+        // detect that v1 is already recorded and apply v2 + v3 (the latter
+        // adds the event-log table that backs the timeline UI).
         var runner = new MigrationRunner();
         await using (var conn = await temp.RawFactory.OpenAsync())
         {
             var applied = await runner.RunAsync(conn);
-            Assert.Equal(new[] { 2 }, applied.ToArray());
+            Assert.Equal(new[] { 2, 3 }, applied.ToArray());
         }
 
         // Verify post-migration state.
@@ -501,6 +504,203 @@ public class MigrationRunnerTests
             Assert.Equal(0, await conn.QuerySingleAsync<long>(
                 "SELECT COUNT(*) FROM notification_local_states WHERE account_id = 'acct-x';"));
         }
+    }
+
+    [Fact]
+    public async Task Inserting_event_with_unknown_account_fails_with_fk_violation()
+    {
+        // Migration v3 declares fk_events_account on (account_id) → accounts(id).
+        // A row referencing a non-existent account must be rejected so a sync
+        // accident cannot leave orphaned event rows behind.
+        await using var temp = new TempDatabase(seedAccounts: false);
+        await using var connection = await temp.RawFactory.OpenAsync();
+
+        await Assert.ThrowsAsync<SqliteException>(async () =>
+        {
+            await connection.ExecuteAsync(
+                """
+                INSERT INTO notification_events (
+                    account_id, notification_id, thread_id, repository_full_name,
+                    subject_type, subject_title, subject_api_url, web_url,
+                    reason, source_updated_at, observed_at,
+                    unread, last_read_at, raw_json)
+                VALUES ('no-such-account', 'no-such-account:t1', 't1', 'octo/repo',
+                        'PullRequest', 'T', NULL, NULL,
+                        'Mention', '2026-05-01T00:00:00+00:00', '2026-05-01T00:00:00+00:00',
+                        1, NULL, '{}');
+                """);
+        });
+    }
+
+    [Fact]
+    public async Task Inserting_event_with_unknown_notification_fails_with_fk_violation()
+    {
+        // The composite FK on (account_id, notification_id) → notifications
+        // (account_id, id) prevents an event from referencing a notification
+        // that does not exist for the account, even when the account itself
+        // is valid.
+        await using var temp = new TempDatabase(seedAccounts: false);
+        await using var connection = await temp.RawFactory.OpenAsync();
+
+        await connection.ExecuteAsync(
+            """
+            INSERT INTO accounts (id, host_url, api_base_url, login, credential_key, created_at, last_validated_at)
+            VALUES ('acct-x', 'github.com', 'https://api.github.com', NULL, 'k', '2026-05-01T00:00:00+00:00', NULL);
+            """);
+
+        await Assert.ThrowsAsync<SqliteException>(async () =>
+        {
+            await connection.ExecuteAsync(
+                """
+                INSERT INTO notification_events (
+                    account_id, notification_id, thread_id, repository_full_name,
+                    subject_type, subject_title, subject_api_url, web_url,
+                    reason, source_updated_at, observed_at,
+                    unread, last_read_at, raw_json)
+                VALUES ('acct-x', 'acct-x:n-missing', 'n-missing', 'octo/repo',
+                        'PullRequest', 'T', NULL, NULL,
+                        'Mention', '2026-05-01T00:00:00+00:00', '2026-05-01T00:00:00+00:00',
+                        1, NULL, '{}');
+                """);
+        });
+    }
+
+    [Fact]
+    public async Task Deleting_account_cascades_to_notification_events()
+    {
+        // Migration v3 declares ON DELETE CASCADE on the account FK; deleting
+        // the account row must wipe its event rows the same way it already
+        // wipes notifications and local-state rows.
+        await using var temp = new TempDatabase(seedAccounts: false);
+        await using var connection = await temp.RawFactory.OpenAsync();
+
+        await connection.ExecuteAsync(
+            """
+            INSERT INTO accounts (id, host_url, api_base_url, login, credential_key, created_at, last_validated_at)
+            VALUES ('acct-x', 'github.com', 'https://api.github.com', NULL, 'k', '2026-05-01T00:00:00+00:00', NULL);
+
+            INSERT INTO notifications (
+                id, account_id, thread_id, repository_full_name,
+                subject_type, subject_title, subject_api_url, web_url,
+                reason, unread, updated_at, last_read_at,
+                raw_json, created_at, synced_at)
+            VALUES ('acct-x:n1', 'acct-x', 'n1', 'octo/repo',
+                    'PullRequest', 'T', NULL, NULL,
+                    'Mention', 1, '2026-05-01T00:00:00+00:00', NULL,
+                    '{}', '2026-05-01T00:00:00+00:00', '2026-05-01T00:00:00+00:00');
+
+            INSERT INTO notification_events (
+                account_id, notification_id, thread_id, repository_full_name,
+                subject_type, subject_title, subject_api_url, web_url,
+                reason, source_updated_at, observed_at,
+                unread, last_read_at, raw_json)
+            VALUES ('acct-x', 'acct-x:n1', 'n1', 'octo/repo',
+                    'PullRequest', 'T', NULL, NULL,
+                    'Mention', '2026-05-01T00:00:00+00:00', '2026-05-01T00:00:00+00:00',
+                    1, NULL, '{}');
+            """);
+
+        Assert.Equal(1, await connection.QuerySingleAsync<long>(
+            "SELECT COUNT(*) FROM notification_events WHERE account_id = 'acct-x';"));
+
+        await connection.ExecuteAsync("DELETE FROM accounts WHERE id = 'acct-x';");
+
+        Assert.Equal(0, await connection.QuerySingleAsync<long>(
+            "SELECT COUNT(*) FROM notification_events WHERE account_id = 'acct-x';"));
+    }
+
+    [Fact]
+    public async Task Deleting_notification_cascades_to_notification_events()
+    {
+        // Composite FK on the notification side cascades event-log rows when
+        // the parent notification is removed (e.g. by the 30-day cache prune
+        // that targets the notifications table).
+        await using var temp = new TempDatabase(seedAccounts: false);
+        await using var connection = await temp.RawFactory.OpenAsync();
+
+        await connection.ExecuteAsync(
+            """
+            INSERT INTO accounts (id, host_url, api_base_url, login, credential_key, created_at, last_validated_at)
+            VALUES ('acct-x', 'github.com', 'https://api.github.com', NULL, 'k', '2026-05-01T00:00:00+00:00', NULL);
+
+            INSERT INTO notifications (
+                id, account_id, thread_id, repository_full_name,
+                subject_type, subject_title, subject_api_url, web_url,
+                reason, unread, updated_at, last_read_at,
+                raw_json, created_at, synced_at)
+            VALUES ('acct-x:n1', 'acct-x', 'n1', 'octo/repo',
+                    'PullRequest', 'T', NULL, NULL,
+                    'Mention', 1, '2026-05-01T00:00:00+00:00', NULL,
+                    '{}', '2026-05-01T00:00:00+00:00', '2026-05-01T00:00:00+00:00');
+
+            INSERT INTO notification_events (
+                account_id, notification_id, thread_id, repository_full_name,
+                subject_type, subject_title, subject_api_url, web_url,
+                reason, source_updated_at, observed_at,
+                unread, last_read_at, raw_json)
+            VALUES ('acct-x', 'acct-x:n1', 'n1', 'octo/repo',
+                    'PullRequest', 'T', NULL, NULL,
+                    'Mention', '2026-05-01T00:00:00+00:00', '2026-05-01T00:00:00+00:00',
+                    1, NULL, '{}');
+            """);
+
+        await connection.ExecuteAsync("DELETE FROM notifications WHERE id = 'acct-x:n1';");
+
+        Assert.Equal(0, await connection.QuerySingleAsync<long>(
+            "SELECT COUNT(*) FROM notification_events WHERE notification_id = 'acct-x:n1';"));
+    }
+
+    [Fact]
+    public async Task Notification_events_dedup_index_blocks_duplicate_observations()
+    {
+        // ux_events_dedup is a UNIQUE index on
+        // (account_id, notification_id, source_updated_at). Re-observing a
+        // thread at the same upstream updated_at must be rejected at the
+        // index level so TryAppendAsync can rely on it for idempotence.
+        await using var temp = new TempDatabase(seedAccounts: false);
+        await using var connection = await temp.RawFactory.OpenAsync();
+
+        await connection.ExecuteAsync(
+            """
+            INSERT INTO accounts (id, host_url, api_base_url, login, credential_key, created_at, last_validated_at)
+            VALUES ('acct-x', 'github.com', 'https://api.github.com', NULL, 'k', '2026-05-01T00:00:00+00:00', NULL);
+
+            INSERT INTO notifications (
+                id, account_id, thread_id, repository_full_name,
+                subject_type, subject_title, subject_api_url, web_url,
+                reason, unread, updated_at, last_read_at,
+                raw_json, created_at, synced_at)
+            VALUES ('acct-x:n1', 'acct-x', 'n1', 'octo/repo',
+                    'PullRequest', 'T', NULL, NULL,
+                    'Mention', 1, '2026-05-01T00:00:00+00:00', NULL,
+                    '{}', '2026-05-01T00:00:00+00:00', '2026-05-01T00:00:00+00:00');
+
+            INSERT INTO notification_events (
+                account_id, notification_id, thread_id, repository_full_name,
+                subject_type, subject_title, subject_api_url, web_url,
+                reason, source_updated_at, observed_at,
+                unread, last_read_at, raw_json)
+            VALUES ('acct-x', 'acct-x:n1', 'n1', 'octo/repo',
+                    'PullRequest', 'T', NULL, NULL,
+                    'Mention', '2026-05-01T00:00:00+00:00', '2026-05-01T00:00:00+00:00',
+                    1, NULL, '{}');
+            """);
+
+        await Assert.ThrowsAsync<SqliteException>(async () =>
+        {
+            await connection.ExecuteAsync(
+                """
+                INSERT INTO notification_events (
+                    account_id, notification_id, thread_id, repository_full_name,
+                    subject_type, subject_title, subject_api_url, web_url,
+                    reason, source_updated_at, observed_at,
+                    unread, last_read_at, raw_json)
+                VALUES ('acct-x', 'acct-x:n1', 'n1', 'octo/repo',
+                        'PullRequest', 'T', NULL, NULL,
+                        'Mention', '2026-05-01T00:00:00+00:00', '2026-05-09T00:00:00+00:00',
+                        1, NULL, '{}');
+                """);
+        });
     }
 
     [Fact]
