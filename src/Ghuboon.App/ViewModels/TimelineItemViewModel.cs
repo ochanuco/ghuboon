@@ -392,7 +392,48 @@ public partial class TimelineItemViewModel : ViewModelBase
                 return;
             }
 
-            Body = await _ctx.Api.GetSubjectBodyAsync(pat, apiUrl, ct).ConfigureAwait(true);
+            // Decide between latest-comment vs subject-description per row.
+            // For self-authored PRs, GitHub keeps reason=Author for every
+            // observation (PR creation, CI activity, your own comments) so
+            // we can't tell from Reason alone what triggered this event.
+            // Heuristic: if THIS event has the largest source_updated_at
+            // among all events for the thread, treat it as "the most recent
+            // observation" and prefer the latest-comment body. Earlier
+            // observations of the same thread fall back to the subject
+            // description so the user can still see what the PR is about.
+            var preferComment = false;
+            if (_ctx.EventRepository is { } eventRepo
+                && !string.IsNullOrEmpty(NotificationId))
+            {
+                var maxSrc = await eventRepo
+                    .GetMaxSourceUpdatedAtForThreadAsync(AccountId, NotificationId, ct)
+                    .ConfigureAwait(true);
+                preferComment = maxSrc.HasValue && maxSrc.Value <= UpdatedAt;
+            }
+            else
+            {
+                // No event repo wired (e.g., placeholder rows). Default to
+                // "latest comment if any" so static demos still surface the
+                // most useful content.
+                preferComment = true;
+            }
+
+            string? content = null;
+            if (preferComment && !string.IsNullOrEmpty(ThreadId))
+            {
+                content = await _ctx.Api
+                    .GetLatestCommentBodyAsync(pat, ThreadId, ct)
+                    .ConfigureAwait(true);
+            }
+
+            if (string.IsNullOrEmpty(content))
+            {
+                content = await _ctx.Api
+                    .GetSubjectBodyAsync(pat, apiUrl, ct)
+                    .ConfigureAwait(true);
+            }
+
+            Body = content;
             BodyLoaded = true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)

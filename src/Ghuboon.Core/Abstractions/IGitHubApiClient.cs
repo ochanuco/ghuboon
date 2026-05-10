@@ -45,6 +45,15 @@ public interface IGitHubApiClient
     /// Returns null on failure.
     /// </summary>
     Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Fetches the latest comment body on a notification thread by following
+    /// <c>subject.latest_comment_url</c> from
+    /// <c>GET /notifications/threads/{thread_id}</c> and reading the
+    /// downstream <c>body</c> field. Returns null when the thread has no
+    /// comment yet, or when the fetch fails.
+    /// </summary>
+    Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default);
 }
 
 /// <summary>

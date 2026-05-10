@@ -136,6 +136,9 @@ public partial class SettingsViewModel : ViewModelBase
 
         public Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default)
             => Task.FromResult<string?>(null);
+
+        public Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default)
+            => Task.FromResult<string?>(null);
     }
 
     private sealed class EmptyNotificationRepository : INotificationRepository

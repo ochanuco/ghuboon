@@ -12,12 +12,11 @@ namespace Ghuboon.Infrastructure.Notifications;
 public sealed class HighPriorityNotificationGate : IDesktopNotificationGate
 {
     // OS-banner reasons. The PLAN.md baseline keeps to the high-signal four
-    // (Review/Mention/TeamMention/Assigned). We additionally include MyPr and
-    // State so the user is notified about authored-PR activity (created with
-    // CI/auto-activity firing the first author notification) and Draft ⇄ Open
-    // toggles (state_change). Subscribed/Watching/Comment/CiActivity remain
-    // suppressed because they are typically too chatty (release-bot pushes,
-    // dependabot watch-fired comments, periodic CI re-runs, etc.).
+    // (Review/Mention/TeamMention/Assigned). User-driven additions: MyPr and
+    // State surface authored-PR activity and Draft ⇄ Open toggles; Comment
+    // surfaces every PR/Issue comment so the user can read replies without
+    // tabbing back. Subscribed / Watching / CiActivity remain suppressed
+    // because they are noisy (release bots, dependabot, periodic CI runs).
     private static readonly IReadOnlySet<NotificationReason> HighPriorityReasons =
         new HashSet<NotificationReason>
         {
@@ -27,6 +26,7 @@ public sealed class HighPriorityNotificationGate : IDesktopNotificationGate
             NotificationReason.Assigned,
             NotificationReason.MyPr,
             NotificationReason.State,
+            NotificationReason.Comment,
         };
 
     private readonly LastNotifiedTracker _tracker;

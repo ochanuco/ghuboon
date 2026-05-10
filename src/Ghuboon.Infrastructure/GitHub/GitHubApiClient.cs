@@ -99,9 +99,15 @@ public sealed class GitHubApiClient : IGitHubApiClient
             request.All, request.Participating, !string.IsNullOrEmpty(request.IfNoneMatch));
 
         using var httpRequest = BuildRequest(HttpMethod.Get, path, pat);
-        if (!string.IsNullOrEmpty(request.IfNoneMatch))
+        // Skip the conditional header for "empty" etags. GitHub may have
+        // previously responded with `etag: ""` (or `W/""`) which we then
+        // stored — sending it back unconditionally returns 304 forever.
+        var ifNoneMatch = request.IfNoneMatch;
+        if (!string.IsNullOrWhiteSpace(ifNoneMatch)
+            && !string.Equals(ifNoneMatch, "\"\"", StringComparison.Ordinal)
+            && !string.Equals(ifNoneMatch, "W/\"\"", StringComparison.Ordinal))
         {
-            httpRequest.Headers.IfNoneMatch.ParseAdd(request.IfNoneMatch);
+            httpRequest.Headers.IfNoneMatch.ParseAdd(ifNoneMatch);
         }
 
         try
@@ -109,7 +115,17 @@ public sealed class GitHubApiClient : IGitHubApiClient
             using var response = await _http.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
 
             var rateLimit = ParseRateLimit(response);
-            var etag = response.Headers.ETag?.Tag;
+            // GitHub's notifications endpoint sometimes returns an empty
+            // quoted etag (`etag: ""`). Persisting that and sending it back
+            // as If-None-Match makes GitHub respond 304 forever even when
+            // new threads arrive. Treat empty/whitespace-only etag tags as
+            // "no etag" so the next sync omits the conditional header.
+            var rawEtag = response.Headers.ETag?.Tag;
+            var etag = string.IsNullOrWhiteSpace(rawEtag)
+                || string.Equals(rawEtag, "\"\"", StringComparison.Ordinal)
+                || string.Equals(rawEtag, "W/\"\"", StringComparison.Ordinal)
+                ? null
+                : rawEtag;
 
             if (response.StatusCode == HttpStatusCode.NotModified)
             {
@@ -254,7 +270,20 @@ public sealed class GitHubApiClient : IGitHubApiClient
         }
     }
 
-    public async Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default)
+    public Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default)
+        => GetThreadSubjectFieldAsync(pat, threadId, "url", ct);
+
+    public async Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default)
+    {
+        var commentUrl = await GetThreadSubjectFieldAsync(pat, threadId, "latest_comment_url", ct).ConfigureAwait(false);
+        if (string.IsNullOrEmpty(commentUrl))
+        {
+            return null;
+        }
+        return await GetSubjectBodyAsync(pat, commentUrl, ct).ConfigureAwait(false);
+    }
+
+    private async Task<string?> GetThreadSubjectFieldAsync(string pat, string threadId, string fieldName, CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(pat);
         ArgumentException.ThrowIfNullOrWhiteSpace(threadId);
@@ -265,7 +294,7 @@ public sealed class GitHubApiClient : IGitHubApiClient
             using var response = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
             {
-                _log.Information("GetThreadSubjectUrl non-success status {StatusCode}", (int)response.StatusCode);
+                _log.Information("GetThreadSubjectField {Field} non-success status {StatusCode}", fieldName, (int)response.StatusCode);
                 return null;
             }
             using var doc = await JsonDocument.ParseAsync(
@@ -274,15 +303,15 @@ public sealed class GitHubApiClient : IGitHubApiClient
             if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
             if (doc.RootElement.TryGetProperty("subject", out var subj)
                 && subj.ValueKind == JsonValueKind.Object
-                && subj.TryGetProperty("url", out var url)
-                && url.ValueKind == JsonValueKind.String)
+                && subj.TryGetProperty(fieldName, out var v)
+                && v.ValueKind == JsonValueKind.String)
             {
-                return url.GetString();
+                return v.GetString();
             }
             return null;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception ex) { _log.Information(ex, "GetThreadSubjectUrl failed (non-fatal)"); return null; }
+        catch (Exception ex) { _log.Information(ex, "GetThreadSubjectField {Field} failed (non-fatal)", fieldName); return null; }
     }
 
     private static HttpRequestMessage BuildRequest(HttpMethod method, string relativePath, string pat)

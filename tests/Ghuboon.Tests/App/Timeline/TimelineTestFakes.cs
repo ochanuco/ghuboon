@@ -135,6 +135,16 @@ internal sealed class FakeNotificationEventRepository : INotificationEventReposi
         var removed = Events.RemoveAll(e => e.ObservedAt < cutoff);
         return Task.FromResult(removed);
     }
+
+    public Task<DateTimeOffset?> GetMaxSourceUpdatedAtForThreadAsync(string accountId, string notificationId, CancellationToken ct = default)
+    {
+        var max = Events
+            .Where(e => e.AccountId == accountId && e.NotificationId == notificationId)
+            .Select(e => (DateTimeOffset?)e.SourceUpdatedAt)
+            .DefaultIfEmpty()
+            .Max();
+        return Task.FromResult(max);
+    }
 }
 
 internal sealed class FakeRepositoryRepository : IRepositoryRepository
@@ -227,6 +237,11 @@ internal sealed class FakeApiClient : IGitHubApiClient
 
     public Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default)
         => Task.FromResult(GetThreadSubjectUrlOverride?.Invoke(threadId));
+
+    public Func<string, string?>? GetLatestCommentBodyOverride { get; set; }
+
+    public Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default)
+        => Task.FromResult(GetLatestCommentBodyOverride?.Invoke(threadId));
 }
 
 internal sealed class FakeBrowser : IBrowserService

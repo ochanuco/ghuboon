@@ -187,6 +187,38 @@ public sealed class NotificationEventRepository : INotificationEventRepository
             cancellationToken: ct)).ConfigureAwait(false);
     }
 
+    public async Task<DateTimeOffset?> GetMaxSourceUpdatedAtForThreadAsync(string accountId, string notificationId, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(accountId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(notificationId);
+
+        await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
+
+        const string sql = """
+                           SELECT source_updated_at
+                           FROM notification_events
+                           WHERE account_id = @accountId
+                             AND notification_id = @notificationId
+                           ORDER BY datetime(source_updated_at) DESC
+                           LIMIT 1;
+                           """;
+
+        var raw = await connection.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
+            sql,
+            new { accountId, notificationId },
+            cancellationToken: ct)).ConfigureAwait(false);
+
+        if (string.IsNullOrEmpty(raw))
+        {
+            return null;
+        }
+
+        return DateTimeOffset.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.RoundtripKind, out var value)
+            ? value
+            : null;
+    }
+
     private static NotificationEvent Map(NotificationEventRow row)
     {
         var subject = new NotificationSubject(row.SubjectType, row.SubjectTitle, row.SubjectApiUrl, row.WebUrl);

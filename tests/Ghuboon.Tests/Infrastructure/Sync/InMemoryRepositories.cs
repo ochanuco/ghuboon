@@ -226,6 +226,19 @@ internal sealed class InMemoryNotificationEventRepository : INotificationEventRe
         }
     }
 
+    public Task<DateTimeOffset?> GetMaxSourceUpdatedAtForThreadAsync(string accountId, string notificationId, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            var max = _entries
+                .Where(e => e.Event.AccountId == accountId && e.Event.NotificationId == notificationId)
+                .Select(e => (DateTimeOffset?)e.Event.SourceUpdatedAt)
+                .DefaultIfEmpty()
+                .Max();
+            return Task.FromResult(max);
+        }
+    }
+
     public int Count
     {
         get
