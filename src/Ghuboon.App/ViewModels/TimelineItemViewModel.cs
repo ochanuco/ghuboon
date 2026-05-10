@@ -288,6 +288,9 @@ public partial class TimelineItemViewModel : ViewModelBase
         _ => "#6E7781",
     };
 
+    private const string PlaceholderAccountId = "placeholder";
+    private const string PlaceholderRepositoryFullName = "placeholder/placeholder";
+
     private static GitHubNotification BuildPlaceholderSource(
         string id,
         string repositoryFullName,
@@ -297,15 +300,50 @@ public partial class TimelineItemViewModel : ViewModelBase
         bool unread)
     {
         var parsed = NotificationReasonMap.From(reason);
+        // GitHubNotification invariants (Phase 2 hardening) require non-empty
+        // Id/AccountId/ThreadId and Id == "{AccountId}:{ThreadId}". The legacy
+        // placeholder ctor predates those invariants; synthesize a deterministic
+        // synthetic AccountId/ThreadId so the legacy callers keep working.
+        var safeId = string.IsNullOrWhiteSpace(id) ? "placeholder" : id;
+        var threadId = safeId;
+        var compositeId = $"{PlaceholderAccountId}:{threadId}";
+        var safeRepo = string.IsNullOrWhiteSpace(repositoryFullName)
+            ? PlaceholderRepositoryFullName
+            : repositoryFullName;
+        // If the caller-supplied repo is malformed for the new invariants
+        // ("owner/name", exactly one slash, both sides non-empty), fall back to
+        // a safe sentinel so design-time/legacy paths keep working.
+        if (!IsValidRepositoryFullName(safeRepo))
+        {
+            safeRepo = PlaceholderRepositoryFullName;
+        }
         return new GitHubNotification(
-            id,
-            AccountId: string.Empty,
-            ThreadId: string.Empty,
-            RepositoryFullName: repositoryFullName ?? string.Empty,
+            compositeId,
+            AccountId: PlaceholderAccountId,
+            ThreadId: threadId,
+            RepositoryFullName: safeRepo,
             Subject: new NotificationSubject("PullRequest", title ?? string.Empty, null, null),
             Reason: parsed,
             Unread: unread,
             UpdatedAt: updatedAt,
             LastReadAt: null);
+    }
+
+    private static bool IsValidRepositoryFullName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var slash = value.IndexOf('/');
+        if (slash <= 0 || slash != value.LastIndexOf('/') || slash == value.Length - 1)
+        {
+            return false;
+        }
+
+        var owner = value.AsSpan(0, slash);
+        var name = value.AsSpan(slash + 1);
+        return !owner.IsWhiteSpace() && !name.IsWhiteSpace();
     }
 }
