@@ -213,7 +213,7 @@ internal sealed class TempDatabase : IDisposable, IAsyncDisposable
                                                  subject_type, subject_title, subject_api_url, web_url,
                                                  reason, unread, updated_at, last_read_at,
                                                  raw_json, created_at, synced_at)
-                                            VALUES (@id, 'acct-1', @id, 'octo/repo',
+                                            VALUES (@id, 'acct-1', @thread_id, 'octo/repo',
                                                     'PullRequest', 'Seeded', NULL, NULL,
                                                     'Mention', 1, @now, NULL,
                                                     '{}', @now, @now);
@@ -221,9 +221,20 @@ internal sealed class TempDatabase : IDisposable, IAsyncDisposable
 
                     foreach (var id in _notificationIds)
                     {
+                        // Issue #39: Lane N's invariant is that
+                        // GitHubNotification.Id is "{accountId}:{threadId}" while
+                        // notifications.thread_id stores the bare upstream thread
+                        // id. When the seed id contains ":", bind only the
+                        // substring after the colon to thread_id; bare ids stay
+                        // as-is. Without this, the seeded thread_id was the full
+                        // composite (e.g. "acct-1:n1") rather than "n1".
+                        var threadId = id.Contains(':', StringComparison.Ordinal)
+                            ? id[(id.IndexOf(':', StringComparison.Ordinal) + 1)..]
+                            : id;
+
                         await connection.ExecuteAsync(new CommandDefinition(
                             notifSql,
-                            new { id, now = nowIso },
+                            new { id, thread_id = threadId, now = nowIso },
                             cancellationToken: ct)).ConfigureAwait(false);
                     }
                 }
