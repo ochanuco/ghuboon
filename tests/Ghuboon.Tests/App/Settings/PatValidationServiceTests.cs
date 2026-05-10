@@ -87,5 +87,8 @@ public class PatValidationServiceTests
 
         public Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default)
             => throw new NotImplementedException();
+
+        public Task<(string? Body, string? AuthorLogin)> GetLatestCommentDetailsAsync(string pat, string threadId, CancellationToken ct = default)
+            => throw new NotImplementedException();
     }
 }

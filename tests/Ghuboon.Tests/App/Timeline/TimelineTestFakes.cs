@@ -242,6 +242,11 @@ internal sealed class FakeApiClient : IGitHubApiClient
 
     public Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default)
         => Task.FromResult(GetLatestCommentBodyOverride?.Invoke(threadId));
+
+    public Func<string, (string?, string?)>? GetLatestCommentDetailsOverride { get; set; }
+
+    public Task<(string? Body, string? AuthorLogin)> GetLatestCommentDetailsAsync(string pat, string threadId, CancellationToken ct = default)
+        => Task.FromResult(GetLatestCommentDetailsOverride?.Invoke(threadId) ?? (null, null));
 }
 
 internal sealed class FakeBrowser : IBrowserService

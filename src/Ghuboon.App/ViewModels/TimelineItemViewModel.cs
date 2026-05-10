@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -34,6 +35,14 @@ namespace Ghuboon.App.ViewModels;
 /// <see cref="TimelineViewModel"/> uses this to refresh aggregated unread counts.
 /// </param>
 /// <param name="Log">Logger; null disables logging from this row.</param>
+public enum BodyBlockKind
+{
+    Markdown,
+    Details,
+}
+
+public sealed record BodyBlock(BodyBlockKind Kind, string Markdown, string? Summary);
+
 public sealed record TimelineItemContext(
     INotificationRepository? Repository,
     INotificationEventRepository? EventRepository,
@@ -74,7 +83,11 @@ public partial class TimelineItemViewModel : ViewModelBase
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasNoBodyAfterLoad))]
+    [NotifyPropertyChangedFor(nameof(BodyBlocks))]
     private string? _body;
+
+    public IReadOnlyList<BodyBlock> BodyBlocks =>
+        SplitIntoBlocks(Body);
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasNoBodyAfterLoad))]
@@ -83,6 +96,9 @@ public partial class TimelineItemViewModel : ViewModelBase
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasNoBodyAfterLoad))]
     private bool _bodyLoaded;
+
+    [ObservableProperty]
+    private string? _bodyAuthorLogin;
 
     private bool _bodyAttempted;
 
@@ -189,6 +205,39 @@ public partial class TimelineItemViewModel : ViewModelBase
     public string ThreadId { get; } = string.Empty;
     public string AccountId { get; } = string.Empty;
     public string RepositoryFullName { get; }
+    /// <summary>
+    /// Owner segment of <see cref="RepositoryFullName"/> ("ochanuco" for
+    /// "ochanuco/ghuboon"). Until we surface the per-event actor, the owner
+    /// is the most useful "user" the timeline can show without an extra API
+    /// fetch per row.
+    /// </summary>
+    public string OwnerLogin
+    {
+        get
+        {
+            var slash = RepositoryFullName?.IndexOf('/') ?? -1;
+            return slash > 0 ? RepositoryFullName![..slash] : (RepositoryFullName ?? string.Empty);
+        }
+    }
+
+    /// <summary>
+    /// Numeric local autoincrement id of the underlying notification_events
+    /// row, surfaced for debug ("which row is this?"). Returns null for the
+    /// non-event-backed legacy paths (placeholders, design-time stubs).
+    /// </summary>
+    public long? EventLocalId
+    {
+        get
+        {
+            const string prefix = "evt:";
+            if (Id.StartsWith(prefix, StringComparison.Ordinal)
+                && long.TryParse(Id.AsSpan(prefix.Length), out var n))
+            {
+                return n;
+            }
+            return null;
+        }
+    }
     public string Title { get; }
     public NotificationReason Reason { get; }
     public string ReasonRaw { get; private set; }
@@ -336,6 +385,17 @@ public partial class TimelineItemViewModel : ViewModelBase
         IsExpanded = !IsExpanded;
     }
 
+    [RelayCommand]
+    private async Task CopyEventIdAsync()
+    {
+        if (_ctx.Clipboard is null) return;
+        var label = EventLocalId is { } n
+            ? n.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : Id;
+        await _ctx.Clipboard.SetTextAsync(label).ConfigureAwait(false);
+        FlashMessage = $"Copied event id {label}";
+    }
+
     /// <summary>
     /// Lazy-fetch the PR/Issue/Comment body from GitHub for the detail panel.
     /// Idempotent — guarded by <c>_bodyAttempted</c> so repeat selection of the
@@ -419,11 +479,14 @@ public partial class TimelineItemViewModel : ViewModelBase
             }
 
             string? content = null;
+            string? authorLogin = null;
             if (preferComment && !string.IsNullOrEmpty(ThreadId))
             {
-                content = await _ctx.Api
-                    .GetLatestCommentBodyAsync(pat, ThreadId, ct)
+                var details = await _ctx.Api
+                    .GetLatestCommentDetailsAsync(pat, ThreadId, ct)
                     .ConfigureAwait(true);
+                content = details.Body;
+                authorLogin = details.AuthorLogin;
             }
 
             if (string.IsNullOrEmpty(content))
@@ -431,9 +494,13 @@ public partial class TimelineItemViewModel : ViewModelBase
                 content = await _ctx.Api
                     .GetSubjectBodyAsync(pat, apiUrl, ct)
                     .ConfigureAwait(true);
+                // Subject (PR/Issue) author isn't surfaced here; leave
+                // BodyAuthorLogin null and the detail pane falls back to the
+                // repo owner header for non-comment content.
             }
 
-            Body = content;
+            Body = StripHtmlComments(content);
+            BodyAuthorLogin = authorLogin;
             BodyLoaded = true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -449,6 +516,190 @@ public partial class TimelineItemViewModel : ViewModelBase
         {
             IsLoadingBody = false;
         }
+    }
+
+    /// <summary>
+    /// Sanitize Markdown before rendering: strip HTML comments and a few
+    /// bare HTML wrappers that GitHub bots ship raw, then collapse runs of
+    /// blank lines. <c>&lt;details&gt;</c> blocks are NOT touched here —
+    /// they're handled by <see cref="SplitIntoBlocks"/>.
+    /// </summary>
+    public static string? StripHtmlComments(string? markdown)
+    {
+        if (string.IsNullOrEmpty(markdown)) return markdown;
+
+        var s = markdown!;
+        var rx = System.Text.RegularExpressions.RegexOptions.Singleline
+                 | System.Text.RegularExpressions.RegexOptions.IgnoreCase;
+        var rxLine = System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                     | System.Text.RegularExpressions.RegexOptions.Multiline;
+
+        // 1. HTML comments (<!-- ... -->).
+        s = System.Text.RegularExpressions.Regex.Replace(s, "<!--.*?-->", string.Empty, rx);
+
+        // 2. drop a few bare wrapper tags. <blockquote>'s content stays.
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"</?blockquote[^>]*>", string.Empty, rx);
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"</?sub[^>]*>", string.Empty, rx);
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"</?sup[^>]*>", string.Empty, rx);
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"</?small[^>]*>", string.Empty, rx);
+
+        // 3. collapse 3+ newlines down to a paragraph break.
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"(\r?\n){3,}", "\n\n", rxLine);
+
+        return s.Trim();
+    }
+
+    /// <summary>
+    /// Split a Markdown blob into ordered blocks the detail pane renders
+    /// individually:
+    ///   * <see cref="BodyBlockKind.Markdown"/> — vanilla markdown the
+    ///     <c>MarkdownScrollViewer</c> can render.
+    ///   * <see cref="BodyBlockKind.Details"/> — a collapsible region; the
+    ///     <c>Summary</c> becomes the Expander header and the body becomes
+    ///     a nested MarkdownScrollViewer.
+    /// Nested details are flattened (each one becomes its own block) — that
+    /// matches GitHub's UI which renders them as siblings once expanded.
+    /// </summary>
+    public static IReadOnlyList<BodyBlock> SplitIntoBlocks(string? sanitized)
+    {
+        if (string.IsNullOrEmpty(sanitized)) return Array.Empty<BodyBlock>();
+
+        var blocks = new List<BodyBlock>();
+        var i = 0;
+        while (i < sanitized!.Length)
+        {
+            var openIdx = FindNextTag(sanitized, i, "<details");
+            if (openIdx < 0)
+            {
+                AddText(blocks, sanitized.Substring(i));
+                break;
+            }
+            if (openIdx > i)
+            {
+                AddText(blocks, sanitized.Substring(i, openIdx - i));
+            }
+            // Skip the opening tag, including any attributes up to '>'.
+            var openEnd = sanitized.IndexOf('>', openIdx);
+            if (openEnd < 0) { AddText(blocks, sanitized.Substring(i)); break; }
+            var bodyStart = openEnd + 1;
+
+            var closeIdx = FindBalancedClose(sanitized, bodyStart);
+            if (closeIdx < 0)
+            {
+                // unclosed <details> — keep the rest as plain text.
+                AddText(blocks, sanitized.Substring(i));
+                break;
+            }
+            var bodyEnd = closeIdx;
+            var afterClose = sanitized.IndexOf('>', closeIdx) + 1;
+
+            var inner = sanitized.Substring(bodyStart, bodyEnd - bodyStart);
+
+            // Pull out the (optional) leading <summary>X</summary>.
+            string? summary = null;
+            var sumRx = new System.Text.RegularExpressions.Regex(
+                @"<summary[^>]*>(?<inner>.*?)</summary>",
+                System.Text.RegularExpressions.RegexOptions.Singleline
+                | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            var sm = sumRx.Match(inner);
+            if (sm.Success)
+            {
+                summary = sm.Groups["inner"].Value.Trim();
+                inner = inner.Remove(sm.Index, sm.Length);
+            }
+
+            // Recurse on the rest so nested <details> become their own
+            // sibling blocks within the parent's expanded body.
+            var nested = SplitIntoBlocks(inner);
+            blocks.Add(new BodyBlock(BodyBlockKind.Details, JoinBlocks(nested), summary ?? "(details)"));
+
+            i = afterClose > 0 ? afterClose : sanitized.Length;
+        }
+
+        return blocks;
+    }
+
+    private static int FindNextTag(string s, int start, string tagPrefix)
+    {
+        // Case-insensitive search for the opening tag prefix (e.g. "<details").
+        var idx = start;
+        while (idx <= s.Length - tagPrefix.Length)
+        {
+            if (string.Compare(s, idx, tagPrefix, 0, tagPrefix.Length, StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                // Ensure the next char is '>' or whitespace so "<details" doesn't
+                // accidentally match "<detailsfoo".
+                var next = idx + tagPrefix.Length;
+                if (next >= s.Length || s[next] == '>' || char.IsWhiteSpace(s[next]))
+                {
+                    return idx;
+                }
+            }
+            idx++;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// Given a position immediately after a <c>&lt;details&gt;</c> opening
+    /// tag, return the index of the matching <c>&lt;/details&gt;</c>. Tracks
+    /// nested opens so balanced pairs are honored.
+    /// </summary>
+    private static int FindBalancedClose(string s, int start)
+    {
+        var depth = 1;
+        var idx = start;
+        while (idx < s.Length)
+        {
+            var open = FindNextTag(s, idx, "<details");
+            var close = FindNextTag(s, idx, "</details");
+            if (close < 0) return -1;
+
+            if (open >= 0 && open < close)
+            {
+                depth++;
+                idx = open + "<details".Length;
+            }
+            else
+            {
+                depth--;
+                if (depth == 0) return close;
+                idx = close + "</details".Length;
+            }
+        }
+        return -1;
+    }
+
+    private static void AddText(List<BodyBlock> blocks, string text)
+    {
+        var trimmed = text.Trim();
+        if (trimmed.Length == 0) return;
+        blocks.Add(new BodyBlock(BodyBlockKind.Markdown, trimmed, null));
+    }
+
+    private static string JoinBlocks(IReadOnlyList<BodyBlock> blocks)
+    {
+        // For nested-details bodies we just concatenate the markdown
+        // content; if there are inner details, they show up as un-expanded
+        // headers (we'd need a recursive ItemsControl to fully restore the
+        // tree, which is an MVP follow-up).
+        var sb = new System.Text.StringBuilder();
+        foreach (var b in blocks)
+        {
+            if (b.Kind == BodyBlockKind.Markdown)
+            {
+                sb.AppendLine(b.Markdown);
+                sb.AppendLine();
+            }
+            else
+            {
+                sb.AppendLine($"**{b.Summary}**");
+                sb.AppendLine();
+                sb.AppendLine(b.Markdown);
+                sb.AppendLine();
+            }
+        }
+        return sb.ToString().Trim();
     }
 
     /// <summary>

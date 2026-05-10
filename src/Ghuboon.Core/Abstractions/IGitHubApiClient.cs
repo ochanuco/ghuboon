@@ -54,6 +54,14 @@ public interface IGitHubApiClient
     /// comment yet, or when the fetch fails.
     /// </summary>
     Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Same as <see cref="GetLatestCommentBodyAsync"/> but also returns the
+    /// commenter's GitHub login. Used by the detail pane to attribute the
+    /// comment correctly (e.g. <c>@coderabbitai</c>) instead of falling
+    /// back to the repo owner.
+    /// </summary>
+    Task<(string? Body, string? AuthorLogin)> GetLatestCommentDetailsAsync(string pat, string threadId, CancellationToken ct = default);
 }
 
 /// <summary>

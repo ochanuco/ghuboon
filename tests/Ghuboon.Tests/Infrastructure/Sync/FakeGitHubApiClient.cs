@@ -63,4 +63,7 @@ internal sealed class FakeGitHubApiClient : IGitHubApiClient
 
     public Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default)
         => Task.FromResult<string?>(null);
+
+    public Task<(string? Body, string? AuthorLogin)> GetLatestCommentDetailsAsync(string pat, string threadId, CancellationToken ct = default)
+        => Task.FromResult<(string?, string?)>((null, null));
 }

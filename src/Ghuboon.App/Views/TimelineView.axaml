@@ -26,13 +26,14 @@
                 BorderThickness="0,0,0,1"
                 BorderBrush="#22000000"
                 Background="#06000000">
-            <Grid ColumnDefinitions="14,96,220,*,28,64">
+            <Grid ColumnDefinitions="14,96,220,120,*,28,64">
                 <TextBlock Grid.Column="0" Text="" />
-                <TextBlock Grid.Column="1" Text="Reason"   FontSize="11" FontWeight="SemiBold" Opacity="0.7" Margin="6,0,0,0" />
+                <TextBlock Grid.Column="1" Text="Reason"     FontSize="11" FontWeight="SemiBold" Opacity="0.7" Margin="6,0,0,0" />
                 <TextBlock Grid.Column="2" Text="Repository" FontSize="11" FontWeight="SemiBold" Opacity="0.7" Margin="6,0,0,0" />
-                <TextBlock Grid.Column="3" Text="Title"      FontSize="11" FontWeight="SemiBold" Opacity="0.7" Margin="6,0,0,0" />
-                <TextBlock Grid.Column="4" Text="Open"       FontSize="11" FontWeight="SemiBold" Opacity="0.7" HorizontalAlignment="Center" />
-                <TextBlock Grid.Column="5" Text="Updated"    FontSize="11" FontWeight="SemiBold" Opacity="0.7" HorizontalAlignment="Right" />
+                <TextBlock Grid.Column="3" Text="User"       FontSize="11" FontWeight="SemiBold" Opacity="0.7" Margin="6,0,0,0" />
+                <TextBlock Grid.Column="4" Text="Title"      FontSize="11" FontWeight="SemiBold" Opacity="0.7" Margin="6,0,0,0" />
+                <TextBlock Grid.Column="5" Text="Open"       FontSize="11" FontWeight="SemiBold" Opacity="0.7" HorizontalAlignment="Center" />
+                <TextBlock Grid.Column="6" Text="Updated"    FontSize="11" FontWeight="SemiBold" Opacity="0.7" HorizontalAlignment="Right" />
             </Grid>
         </Border>
 
@@ -64,9 +65,18 @@
                             Background="Transparent"
                             BorderThickness="0,0,0,1"
                             BorderBrush="#11000000">
+                        <Border.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Copy event id" Command="{Binding CopyEventIdCommand}" />
+                                <MenuItem Header="Copy URL"      Command="{Binding CopyUrlCommand}" />
+                                <Separator />
+                                <MenuItem Header="Open in GitHub" Command="{Binding OpenInGitHubCommand}" />
+                                <MenuItem Header="Mark as read"   Command="{Binding MarkAsReadCommand}" />
+                            </ContextMenu>
+                        </Border.ContextMenu>
                         <StackPanel>
                             <!-- Single-row layout: unread / reason / repo / title / time -->
-                            <Grid ColumnDefinitions="14,96,220,*,28,64"
+                            <Grid ColumnDefinitions="14,96,220,120,*,28,64"
                                   VerticalAlignment="Center"
                                   Margin="8,4">
                                 <Ellipse Grid.Column="0"
@@ -97,6 +107,13 @@
                                            TextTrimming="CharacterEllipsis" />
 
                                 <TextBlock Grid.Column="3"
+                                           Text="{Binding OwnerLogin, StringFormat='@{0}'}"
+                                           Margin="6,0,0,0"
+                                           VerticalAlignment="Center"
+                                           Opacity="0.7"
+                                           TextTrimming="CharacterEllipsis" />
+
+                                <TextBlock Grid.Column="4"
                                            Text="{Binding Title}"
                                            Margin="6,0,0,0"
                                            VerticalAlignment="Center"
@@ -105,7 +122,7 @@
                                            Cursor="Hand"
                                            DoubleTapped="OnTitleDoubleTapped" />
 
-                                <Button Grid.Column="4"
+                                <Button Grid.Column="5"
                                         Command="{Binding OpenInGitHubCommand}"
                                         ToolTip.Tip="Open on GitHub.com"
                                         Padding="4,1"
@@ -119,7 +136,7 @@
                                                Opacity="0.7" />
                                 </Button>
 
-                                <TextBlock Grid.Column="5"
+                                <TextBlock Grid.Column="6"
                                            Text="{Binding RelativeTime}"
                                            VerticalAlignment="Center"
                                            HorizontalAlignment="Right"

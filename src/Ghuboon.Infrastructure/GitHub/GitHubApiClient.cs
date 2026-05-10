@@ -273,14 +273,187 @@ public sealed class GitHubApiClient : IGitHubApiClient
     public Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default)
         => GetThreadSubjectFieldAsync(pat, threadId, "url", ct);
 
-    public async Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default)
+    public async Task<(string? Body, string? AuthorLogin)> GetLatestCommentDetailsAsync(string pat, string threadId, CancellationToken ct = default)
     {
         var commentUrl = await GetThreadSubjectFieldAsync(pat, threadId, "latest_comment_url", ct).ConfigureAwait(false);
-        if (string.IsNullOrEmpty(commentUrl))
+        if (!string.IsNullOrEmpty(commentUrl)
+            && commentUrl.Contains("/comments/", StringComparison.Ordinal))
+        {
+            var direct = await GetSubjectBodyAndUserAsync(pat, commentUrl, ct).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(direct.Body)) return direct;
+        }
+
+        var subjectUrl = await GetThreadSubjectFieldAsync(pat, threadId, "url", ct).ConfigureAwait(false);
+        if (string.IsNullOrEmpty(subjectUrl)) return (null, null);
+
+        var commentsUrl = BuildIssueCommentsUrl(subjectUrl);
+        if (commentsUrl is null) return (null, null);
+
+        return await FetchLatestIssueCommentDetailsAsync(pat, commentsUrl, ct).ConfigureAwait(false);
+    }
+
+    public async Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default)
+    {
+        // First try the thread's own latest_comment_url. When GitHub points
+        // it at a real comment ("/comments/<id>") we just fetch that and
+        // return the body. When it falls back to the PR/Issue URL itself
+        // ("/pulls/<n>" or "/issues/<n>" with no /comments/ segment), the
+        // notification was bumped by a non-comment activity (push, review
+        // summary, state change). In that case, fetch the issue-comments
+        // endpoint for the most recently created comment so the detail
+        // pane still shows comment content when one exists.
+        var commentUrl = await GetThreadSubjectFieldAsync(pat, threadId, "latest_comment_url", ct).ConfigureAwait(false);
+        if (!string.IsNullOrEmpty(commentUrl)
+            && commentUrl.Contains("/comments/", StringComparison.Ordinal))
+        {
+            var direct = await GetSubjectBodyAsync(pat, commentUrl, ct).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(direct))
+            {
+                return direct;
+            }
+        }
+
+        // Fall back: ask the issue's comments collection for the newest one.
+        var subjectUrl = await GetThreadSubjectFieldAsync(pat, threadId, "url", ct).ConfigureAwait(false);
+        if (string.IsNullOrEmpty(subjectUrl))
         {
             return null;
         }
-        return await GetSubjectBodyAsync(pat, commentUrl, ct).ConfigureAwait(false);
+
+        var commentsUrl = BuildIssueCommentsUrl(subjectUrl);
+        if (commentsUrl is null)
+        {
+            return null;
+        }
+
+        return await FetchLatestIssueCommentBodyAsync(pat, commentsUrl, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Convert a PR/Issue subject URL into the issue-comments collection URL.
+    /// <c>https://api.github.com/repos/o/r/pulls/31</c> →
+    /// <c>https://api.github.com/repos/o/r/issues/31/comments</c>. PRs share
+    /// the issues/<n>/comments endpoint for top-level comments. Returns
+    /// null if the input doesn't match the expected shape.
+    /// </summary>
+    private static string? BuildIssueCommentsUrl(string subjectUrl)
+    {
+        if (!Uri.TryCreate(subjectUrl, UriKind.Absolute, out var uri)) return null;
+        var segments = uri.AbsolutePath.Trim('/').Split('/');
+        // expected: repos/{owner}/{repo}/{pulls|issues}/{number}
+        if (segments.Length != 5) return null;
+        if (!string.Equals(segments[0], "repos", StringComparison.OrdinalIgnoreCase)) return null;
+        if (!int.TryParse(segments[4], out _)) return null;
+
+        var rebuilt = $"{uri.Scheme}://{uri.Host}/repos/{segments[1]}/{segments[2]}/issues/{segments[4]}/comments";
+        return rebuilt;
+    }
+
+    private async Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndUserAsync(string pat, string subjectApiUrl, CancellationToken ct)
+    {
+        if (!Uri.TryCreate(subjectApiUrl, UriKind.Absolute, out var absolute)) return (null, null);
+        using var req = new HttpRequestMessage(HttpMethod.Get, absolute);
+        req.Headers.UserAgent.ParseAdd(UserAgent);
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(AcceptMediaType));
+        req.Headers.TryAddWithoutValidation(ApiVersionHeader, ApiVersion);
+        req.Headers.Authorization = new AuthenticationHeaderValue("token", pat);
+        try
+        {
+            using var response = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return (null, null);
+            using var doc = await JsonDocument.ParseAsync(
+                await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false),
+                cancellationToken: ct).ConfigureAwait(false);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return (null, null);
+            string? body = null, login = null;
+            if (doc.RootElement.TryGetProperty("body", out var b) && b.ValueKind == JsonValueKind.String) body = b.GetString();
+            if (doc.RootElement.TryGetProperty("user", out var u)
+                && u.ValueKind == JsonValueKind.Object
+                && u.TryGetProperty("login", out var l)
+                && l.ValueKind == JsonValueKind.String)
+            {
+                login = l.GetString();
+            }
+            return (body, login);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex) { _log.Information(ex, "GetSubjectBodyAndUser failed (non-fatal)"); return (null, null); }
+    }
+
+    private async Task<(string? Body, string? AuthorLogin)> FetchLatestIssueCommentDetailsAsync(string pat, string commentsUrl, CancellationToken ct)
+    {
+        var withQuery = $"{commentsUrl}?per_page=1&sort=created&direction=desc";
+        if (!Uri.TryCreate(withQuery, UriKind.Absolute, out var absolute)) return (null, null);
+        using var req = new HttpRequestMessage(HttpMethod.Get, absolute);
+        req.Headers.UserAgent.ParseAdd(UserAgent);
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(AcceptMediaType));
+        req.Headers.TryAddWithoutValidation(ApiVersionHeader, ApiVersion);
+        req.Headers.Authorization = new AuthenticationHeaderValue("token", pat);
+        try
+        {
+            using var response = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return (null, null);
+            using var doc = await JsonDocument.ParseAsync(
+                await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false),
+                cancellationToken: ct).ConfigureAwait(false);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array || doc.RootElement.GetArrayLength() == 0) return (null, null);
+            var first = doc.RootElement[0];
+            if (first.ValueKind != JsonValueKind.Object) return (null, null);
+            string? body = null, login = null;
+            if (first.TryGetProperty("body", out var b) && b.ValueKind == JsonValueKind.String) body = b.GetString();
+            if (first.TryGetProperty("user", out var u)
+                && u.ValueKind == JsonValueKind.Object
+                && u.TryGetProperty("login", out var l)
+                && l.ValueKind == JsonValueKind.String)
+            {
+                login = l.GetString();
+            }
+            return (body, login);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex) { _log.Information(ex, "FetchLatestIssueCommentDetails failed (non-fatal)"); return (null, null); }
+    }
+
+    private async Task<string?> FetchLatestIssueCommentBodyAsync(string pat, string commentsUrl, CancellationToken ct)
+    {
+        var withQuery = $"{commentsUrl}?per_page=1&sort=created&direction=desc";
+        if (!Uri.TryCreate(withQuery, UriKind.Absolute, out var absolute))
+        {
+            return null;
+        }
+
+        using var req = new HttpRequestMessage(HttpMethod.Get, absolute);
+        req.Headers.UserAgent.ParseAdd(UserAgent);
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(AcceptMediaType));
+        req.Headers.TryAddWithoutValidation(ApiVersionHeader, ApiVersion);
+        req.Headers.Authorization = new AuthenticationHeaderValue("token", pat);
+
+        try
+        {
+            using var response = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                _log.Information("FetchLatestIssueComment non-success status {StatusCode}", (int)response.StatusCode);
+                return null;
+            }
+            using var doc = await JsonDocument.ParseAsync(
+                await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false),
+                cancellationToken: ct).ConfigureAwait(false);
+
+            if (doc.RootElement.ValueKind != JsonValueKind.Array || doc.RootElement.GetArrayLength() == 0)
+            {
+                return null;
+            }
+            var first = doc.RootElement[0];
+            if (first.ValueKind != JsonValueKind.Object) return null;
+            if (first.TryGetProperty("body", out var b) && b.ValueKind == JsonValueKind.String)
+            {
+                return b.GetString();
+            }
+            return null;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex) { _log.Information(ex, "FetchLatestIssueComment failed (non-fatal)"); return null; }
     }
 
     private async Task<string?> GetThreadSubjectFieldAsync(string pat, string threadId, string fieldName, CancellationToken ct)
