@@ -228,13 +228,20 @@ public class MigrationRunnerTests
     [Fact]
     public async Task Notification_local_states_uses_composite_primary_key_after_v2()
     {
-        // Issue #32: after migration v2 the primary key is
-        // (account_id, notification_id), not notification_id alone, so the
-        // same notification id can coexist under different accounts.
+        // Issue #32 / #42: after migration v2 the local-state primary key is
+        // (account_id, notification_id), not notification_id alone, and the
+        // FK now points at notifications(account_id, id). Each (account, id)
+        // pair must have its own matching notifications row before the
+        // local-state insert succeeds, but the composite PK still allows the
+        // table to carry independent rows per account — pinned below.
         await using var temp = new TempDatabase(seedAccounts: false);
         await using var connection = await temp.RawFactory.OpenAsync();
 
-        // Seed two accounts and one notifications row per account.
+        // notifications.id is still a global PRIMARY KEY (Issue #42 only
+        // adds a per-account UNIQUE for FK targeting), so two notification
+        // rows cannot share the same id even under different accounts. Use
+        // distinct ids per account and exercise the local-state composite
+        // PK by writing one row per (account_id, notification_id) pair.
         await connection.ExecuteAsync(
             """
             INSERT INTO accounts (id, host_url, api_base_url, login, credential_key, created_at, last_validated_at)
@@ -246,33 +253,109 @@ public class MigrationRunnerTests
                 subject_type, subject_title, subject_api_url, web_url,
                 reason, unread, updated_at, last_read_at,
                 raw_json, created_at, synced_at)
-            VALUES ('shared', 'acct-1', 't1', 'octo/repo',
+            VALUES ('shared-1', 'acct-1', 't1', 'octo/repo',
+                    'PullRequest', 'T', NULL, NULL,
+                    'Mention', 1, '2026-05-01T00:00:00+00:00', NULL,
+                    '{}', '2026-05-01T00:00:00+00:00', '2026-05-01T00:00:00+00:00'),
+                   ('shared-2', 'acct-2', 't1', 'octo/repo',
                     'PullRequest', 'T', NULL, NULL,
                     'Mention', 1, '2026-05-01T00:00:00+00:00', NULL,
                     '{}', '2026-05-01T00:00:00+00:00', '2026-05-01T00:00:00+00:00');
             """);
 
-        // Two rows with the same notification_id but different account_id —
-        // legal under the composite key.
+        // Two local-state rows with distinct notification_ids but each
+        // attached to the matching parent notification — exercises the
+        // composite PK on local-state and the composite FK to notifications.
         await connection.ExecuteAsync(
             """
             INSERT INTO notification_local_states (notification_id, account_id, last_notified_at, is_hidden)
-            VALUES ('shared', 'acct-1', '2026-05-01T00:00:00+00:00', 0),
-                   ('shared', 'acct-2', '2026-05-02T00:00:00+00:00', 0);
+            VALUES ('shared-1', 'acct-1', '2026-05-01T00:00:00+00:00', 0),
+                   ('shared-2', 'acct-2', '2026-05-02T00:00:00+00:00', 0);
             """);
 
         var count = await connection.QuerySingleAsync<long>(
-            "SELECT COUNT(*) FROM notification_local_states WHERE notification_id = 'shared';");
+            "SELECT COUNT(*) FROM notification_local_states;");
         Assert.Equal(2, count);
 
-        // Re-inserting either (account_id, notification_id) pair must fail —
-        // the composite key still enforces uniqueness within an account.
+        // Re-inserting an existing (account_id, notification_id) pair must
+        // fail — the composite key still enforces uniqueness within an
+        // account.
         await Assert.ThrowsAsync<Microsoft.Data.Sqlite.SqliteException>(async () =>
         {
             await connection.ExecuteAsync(
                 """
                 INSERT INTO notification_local_states (notification_id, account_id, last_notified_at, is_hidden)
-                VALUES ('shared', 'acct-1', '2026-06-01T00:00:00+00:00', 0);
+                VALUES ('shared-1', 'acct-1', '2026-06-01T00:00:00+00:00', 0);
+                """);
+        });
+    }
+
+    [Fact]
+    public async Task TempDatabase_seeds_thread_id_as_bare_thread_when_id_is_namespaced()
+    {
+        // Issue #39: TempDatabase's seed loop binds notifications.thread_id
+        // from the seeded id. Lane N's invariant is that id has the shape
+        // "{accountId}:{threadId}" — so the thread_id column must store only
+        // the substring after the colon, never the full composite. Bare ids
+        // (no colon) stay as-is.
+        await using var temp = new TempDatabase();
+        await using var connection = await temp.Factory.OpenAsync();
+
+        // Composite id like "acct-1:n1" → thread_id should be "n1".
+        var composite = await connection.QuerySingleAsync<string>(
+            "SELECT thread_id FROM notifications WHERE id = 'acct-1:n1';");
+        Assert.Equal("n1", composite);
+
+        // Bare id like "n-1" → thread_id stays "n-1".
+        var bare = await connection.QuerySingleAsync<string>(
+            "SELECT thread_id FROM notifications WHERE id = 'n-1';");
+        Assert.Equal("n-1", bare);
+    }
+
+    [Fact]
+    public async Task Local_state_cannot_attach_to_notification_owned_by_different_account()
+    {
+        // Issue #42: notification_local_states declares a composite FK on
+        // (account_id, notification_id) → notifications(account_id, id). A row
+        // that names an existing notification id but a different account_id
+        // must fail FK enforcement, otherwise cross-account local-state
+        // attachment is possible (the previous single-column FK only checked
+        // that *some* notification with that id existed).
+        await using var temp = new TempDatabase(seedAccounts: false);
+        await using var connection = await temp.RawFactory.OpenAsync();
+
+        await connection.ExecuteAsync(
+            """
+            INSERT INTO accounts (id, host_url, api_base_url, login, credential_key, created_at, last_validated_at)
+            VALUES ('acct-1', 'github.com', 'https://api.github.com', NULL, 'k1', '2026-05-01T00:00:00+00:00', NULL),
+                   ('acct-2', 'github.com', 'https://api.github.com', NULL, 'k2', '2026-05-01T00:00:00+00:00', NULL);
+
+            INSERT INTO notifications (
+                id, account_id, thread_id, repository_full_name,
+                subject_type, subject_title, subject_api_url, web_url,
+                reason, unread, updated_at, last_read_at,
+                raw_json, created_at, synced_at)
+            VALUES ('n1', 'acct-1', 't1', 'octo/repo',
+                    'PullRequest', 'T', NULL, NULL,
+                    'Mention', 1, '2026-05-01T00:00:00+00:00', NULL,
+                    '{}', '2026-05-01T00:00:00+00:00', '2026-05-01T00:00:00+00:00');
+            """);
+
+        // Inserting under acct-1 succeeds (the matching parent exists).
+        await connection.ExecuteAsync(
+            """
+            INSERT INTO notification_local_states (notification_id, account_id, last_notified_at, is_hidden)
+            VALUES ('n1', 'acct-1', '2026-05-01T00:00:00+00:00', 0);
+            """);
+
+        // Inserting under acct-2 with the same notification_id must fail —
+        // there is no notifications row with (account_id='acct-2', id='n1').
+        await Assert.ThrowsAsync<SqliteException>(async () =>
+        {
+            await connection.ExecuteAsync(
+                """
+                INSERT INTO notification_local_states (notification_id, account_id, last_notified_at, is_hidden)
+                VALUES ('n1', 'acct-2', '2026-05-02T00:00:00+00:00', 0);
                 """);
         });
     }

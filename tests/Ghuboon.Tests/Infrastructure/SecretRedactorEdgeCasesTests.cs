@@ -149,7 +149,10 @@ public class SecretRedactorEdgeCasesTests
         // when the box was loaded. Bumped to 5000 ms — three orders of
         // magnitude over the typical local time (~5 ms). A real ReDoS would
         // blow past this comfortably.
-        Assert.True(sw.ElapsedMilliseconds < 5000,
+        // Issue #42: use <= 5000 so a measurement that lands exactly on the
+        // ceiling does not flip the assert. Stopwatch ticks are coarse enough
+        // on loaded CI hosts that 5000 ms is a reachable measurement.
+        Assert.True(sw.ElapsedMilliseconds <= 5000,
             $"redact took {sw.ElapsedMilliseconds} ms on 100KB input");
         Assert.DoesNotContain(token, output, StringComparison.Ordinal);
         Assert.Contains(SecretRedactor.Replacement, output);

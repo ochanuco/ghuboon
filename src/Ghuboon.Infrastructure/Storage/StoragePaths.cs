@@ -59,17 +59,31 @@ public static class StoragePaths
             // (matches what SpecialFolder would have returned), then USERPROFILE
             // + AppData\Local (the canonical layout when LOCALAPPDATA is unset
             // but USERPROFILE is, e.g. fresh service accounts).
+            //
+            // Issue #42: the env vars can be set to an empty or whitespace-only
+            // string (some sandboxed Windows hosts initialise USERPROFILE to
+            // ""). The previous "?? SpecialFolder.UserProfile" fallback only
+            // tripped on null, leaving an empty USERPROFILE to short-circuit
+            // the SpecialFolder fallback and yield "\AppData\Local\Ghuboon".
+            // Cascade through env → SpecialFolder.UserProfile → temp using
+            // IsUsablePath() so any unusable value falls through cleanly.
             var winLocal = Environment.GetEnvironmentVariable("LOCALAPPDATA");
             if (IsUsablePath(winLocal))
             {
                 return Path.Combine(winLocal, AppFolderName);
             }
 
-            var userProfile = Environment.GetEnvironmentVariable("USERPROFILE")
-                ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            if (IsUsablePath(userProfile))
+            var userProfileEnv = Environment.GetEnvironmentVariable("USERPROFILE");
+            if (IsUsablePath(userProfileEnv))
             {
-                return Path.Combine(userProfile, "AppData", "Local", AppFolderName);
+                return Path.Combine(userProfileEnv, "AppData", "Local", AppFolderName);
+            }
+
+            var userProfileSpecial = Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile);
+            if (IsUsablePath(userProfileSpecial))
+            {
+                return Path.Combine(userProfileSpecial, "AppData", "Local", AppFolderName);
             }
         }
         else

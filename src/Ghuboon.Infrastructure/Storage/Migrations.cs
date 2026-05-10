@@ -3,11 +3,14 @@ namespace Ghuboon.Infrastructure.Storage;
 /// <summary>
 /// All schema migrations the app knows about, in ascending version order.
 /// Migration #1 creates the schema described in PLAN.md (Phase 5).
-/// Migration #2 (issues #32, #37) re-creates the FK-constrained tables to
+/// Migration #2 (issues #32, #37, #42) re-creates the FK-constrained tables to
 /// guarantee that pre-#12 installations gain the ON DELETE CASCADE foreign
-/// keys, and switches <c>notification_local_states</c> to a composite primary
-/// key on <c>(account_id, notification_id)</c> so the same notification id
-/// from two different accounts can be tracked independently.
+/// keys, switches <c>notification_local_states</c> to a composite primary key
+/// on <c>(account_id, notification_id)</c> so the same notification id from
+/// two different accounts can be tracked independently, and tightens the
+/// local-state FK to <c>(account_id, notification_id) → notifications(account_id, id)</c>
+/// so a local-state row cannot point at a notification owned by a different
+/// account.
 /// </summary>
 internal static class Migrations
 {
@@ -101,7 +104,7 @@ internal static class Migrations
                  """),
 
         // ----------------------------------------------------------------
-        // Migration v2 (issues #32, #37):
+        // Migration v2 (issues #32, #37, #42):
         //   * Add composite PK (account_id, notification_id) to
         //     notification_local_states so a notification id observed under
         //     two accounts can be tracked independently. v1's PK on
@@ -111,6 +114,17 @@ internal static class Migrations
         //     that v1 already declares — this is a no-op for DBs created
         //     after #12 landed, but upgrades any pre-#12 v1 install that was
         //     bootstrapped before the FK tightening.
+        //   * Issue #42: tighten the notification_local_states → notifications
+        //     FK from a single-column reference on notifications(id) to a
+        //     composite reference on notifications(account_id, id). Without
+        //     the composite reference, a local-state row could legally point
+        //     at a notification owned by a different account (the FK only
+        //     checked that *some* notification with that id existed). The
+        //     replacement notifications table therefore declares
+        //     UNIQUE (account_id, id), which the composite FK requires per
+        //     SQLite's foreign-key spec. id is already PRIMARY KEY so the
+        //     extra unique index is redundant for row identity but serves as
+        //     the FK target SQLite needs.
         //   * SQLite has no ALTER TABLE ADD CONSTRAINT, so each affected
         //     table follows the rename / create / copy / drop dance from
         //     https://www.sqlite.org/lang_altertable.html#otheralter.
@@ -126,6 +140,12 @@ internal static class Migrations
         // Indexes are recreated explicitly because SQLite drops indexes when
         // their table is dropped, even if we kept the same name on the
         // replacement table.
+        //
+        // Pre-release note: this migration was authored as part of the same
+        // pre-release Phase as the FK upgrade above. There is no shipped data
+        // to preserve, so editing v2 in place (rather than authoring a v3) is
+        // acceptable and keeps the upgrade story to a single hop. Any DB on
+        // disk has been created in the same dev cycle as this code.
         new Migration(
             Version: 2,
             Name: "composite_local_state_key_and_fk_upgrade",
@@ -180,7 +200,15 @@ internal static class Migrations
                    created_at TEXT NOT NULL,
                    synced_at TEXT NOT NULL,
                    CONSTRAINT fk_notifications_account
-                     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+                     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+                   -- Issue #42: notification_local_states declares a composite
+                   -- FK on (account_id, notification_id). SQLite requires the
+                   -- referenced columns to carry a UNIQUE or PRIMARY KEY
+                   -- constraint, so expose (account_id, id) as a candidate
+                   -- key here. id alone is already PRIMARY KEY; this extra
+                   -- constraint just gives the FK its target.
+                   CONSTRAINT ux_notifications_account_id
+                     UNIQUE (account_id, id)
                  );
 
                  INSERT INTO notifications (
@@ -210,8 +238,16 @@ internal static class Migrations
                    last_notified_at TEXT,
                    is_hidden INTEGER NOT NULL DEFAULT 0,
                    PRIMARY KEY (account_id, notification_id),
+                   -- Issue #42: composite FK on (account_id, notification_id)
+                   -- → notifications(account_id, id) prevents a local-state
+                   -- row from attaching to a notification owned by a
+                   -- different account. The previous single-column FK only
+                   -- required the notification id to exist *somewhere* in
+                   -- notifications, which let cross-account state leak
+                   -- through if two accounts ever observed the same id.
                    CONSTRAINT fk_notification_local_states_notification
-                     FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE CASCADE,
+                     FOREIGN KEY (account_id, notification_id)
+                       REFERENCES notifications(account_id, id) ON DELETE CASCADE,
                    CONSTRAINT fk_notification_local_states_account
                      FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
                  );
