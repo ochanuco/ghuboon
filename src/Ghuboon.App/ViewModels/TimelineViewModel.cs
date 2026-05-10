@@ -52,14 +52,16 @@ public partial class TimelineViewModel : ViewModelBase
 
         // Initial synchronous placeholder snapshot; the real impl returns empty,
         // the stub returns demo rows for the previewer / legacy tests.
-        // Issue #8: services return domain notifications now, so we map here.
+        // Event-log timeline: the service now returns NotificationEvent rows
+        // (one per observed update); we map each to a TimelineItemViewModel
+        // via the event-aware overload.
         // Issue #43: invoke the factory per row so each TimelineItemViewModel
         // gets its own TimelineItemContext; sharing a single instance across
         // rows defeats per-row state (e.g., MarkRead callbacks targeting one
         // row can't be customised without leaking into others).
-        foreach (var notification in _timelineService.GetPlaceholderItems())
+        foreach (var ev in _timelineService.GetPlaceholderItems())
         {
-            var vm = new TimelineItemViewModel(notification, _itemContextFactory());
+            var vm = new TimelineItemViewModel(ev, _itemContextFactory());
             AttachItem(vm);
             Items.Add(vm);
         }
@@ -174,20 +176,21 @@ public partial class TimelineViewModel : ViewModelBase
         try
         {
             var filter = Filter;
-            var notifications = await _timelineService.LoadAsync(filter, cts.Token).ConfigureAwait(false);
+            var events = await _timelineService.LoadAsync(filter, cts.Token).ConfigureAwait(false);
 
             // Replace the collection on the same thread the observable model lives on.
             // For unit tests we're already there; in Avalonia, callers should drive this
             // from the UI thread (Dispatcher.UIThread.Post).
             DetachAllItems();
             Items.Clear();
-            // Issue #8: services return domain notifications now; map to VMs here
-            // (Presentation-layer responsibility) using the per-row context.
-            // Issue #43: invoke the factory per row so each item gets its own
-            // context instance (see ctor for full rationale).
-            foreach (var notification in notifications)
+            // Event-log timeline: services return NotificationEvent rows (one
+            // per observed update); we map each to a TimelineItemViewModel via
+            // the event-aware overload. Issue #43: invoke the factory per row
+            // so each item gets its own context instance (see ctor for full
+            // rationale).
+            foreach (var ev in events)
             {
-                var item = new TimelineItemViewModel(notification, _itemContextFactory());
+                var item = new TimelineItemViewModel(ev, _itemContextFactory());
                 AttachItem(item);
                 Items.Add(item);
             }

@@ -12,27 +12,31 @@ namespace Ghuboon.Tests.App.Timeline;
 /// </summary>
 public class DbBackedTimelineServiceFilterTests
 {
-    private static (DbBackedTimelineService svc, FakeNotificationRepository nrepo) Build()
+    private static (DbBackedTimelineService svc, FakeNotificationEventRepository erepo) Build()
     {
-        var nrepo = new FakeNotificationRepository();
+        var erepo = new FakeNotificationEventRepository();
         var rrepo = new FakeRepositoryRepository();
         var arepo = new FakeAccountRepository();
-        var svc = new DbBackedTimelineService(nrepo, rrepo, arepo, accountId: "primary");
+        var svc = new DbBackedTimelineService(erepo, rrepo, arepo, accountId: "primary");
 
         var t0 = new DateTimeOffset(2026, 5, 9, 12, 0, 0, TimeSpan.Zero);
-        nrepo.Notifications.Add(TimelineTestData.Build(
-            "primary:a", "primary", "octocat/repo1", "Add CONTRIBUTING",
-            NotificationReason.Review, true, t0.AddMinutes(-10), "PullRequest"));
-        nrepo.Notifications.Add(TimelineTestData.Build(
-            "primary:b", "primary", "octocat/repo2", "Mention me",
-            NotificationReason.Mention, true, t0.AddMinutes(-2), "Issue"));
-        nrepo.Notifications.Add(TimelineTestData.Build(
-            "primary:c", "primary", "octocat/repo1", "Review the PR",
-            NotificationReason.Review, false, t0.AddMinutes(-30), "PullRequest"));
-        nrepo.Notifications.Add(TimelineTestData.Build(
-            "primary:d", "primary", "ghuboon/playground", "My PR",
-            NotificationReason.MyPr, true, t0.AddHours(-2), "PullRequest"));
-        return (svc, nrepo);
+        erepo.TryAppendAsync(TimelineTestData.BuildEvent(
+            eventId: 0, id: "primary:a", accountId: "primary", repo: "octocat/repo1",
+            title: "Add CONTRIBUTING",
+            reason: NotificationReason.Review, unread: true, updatedAt: t0.AddMinutes(-10), subjectType: "PullRequest")).GetAwaiter().GetResult();
+        erepo.TryAppendAsync(TimelineTestData.BuildEvent(
+            eventId: 0, id: "primary:b", accountId: "primary", repo: "octocat/repo2",
+            title: "Mention me",
+            reason: NotificationReason.Mention, unread: true, updatedAt: t0.AddMinutes(-2), subjectType: "Issue")).GetAwaiter().GetResult();
+        erepo.TryAppendAsync(TimelineTestData.BuildEvent(
+            eventId: 0, id: "primary:c", accountId: "primary", repo: "octocat/repo1",
+            title: "Review the PR",
+            reason: NotificationReason.Review, unread: false, updatedAt: t0.AddMinutes(-30), subjectType: "PullRequest")).GetAwaiter().GetResult();
+        erepo.TryAppendAsync(TimelineTestData.BuildEvent(
+            eventId: 0, id: "primary:d", accountId: "primary", repo: "ghuboon/playground",
+            title: "My PR",
+            reason: NotificationReason.MyPr, unread: true, updatedAt: t0.AddHours(-2), subjectType: "PullRequest")).GetAwaiter().GetResult();
+        return (svc, erepo);
     }
 
     [Fact]

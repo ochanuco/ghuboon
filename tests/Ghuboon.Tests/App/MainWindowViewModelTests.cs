@@ -103,20 +103,20 @@ public class MainWindowViewModelTests
         public int PlaceholderCalls { get; private set; }
         public List<TimelineFilter> Filters { get; } = new();
 
-        public Task<IReadOnlyList<GitHubNotification>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
+        public Task<IReadOnlyList<NotificationEvent>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
         {
             LoadCalls++;
             Filters.Add(filter);
-            return Task.FromResult<IReadOnlyList<GitHubNotification>>(Array.Empty<GitHubNotification>());
+            return Task.FromResult<IReadOnlyList<NotificationEvent>>(Array.Empty<NotificationEvent>());
         }
 
         public Task<IReadOnlyList<RepositoryRef>> ListRepositoriesAsync(CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<RepositoryRef>>(Array.Empty<RepositoryRef>());
 
-        public IReadOnlyList<GitHubNotification> GetPlaceholderItems()
+        public IReadOnlyList<NotificationEvent> GetPlaceholderItems()
         {
             PlaceholderCalls++;
-            return Array.Empty<GitHubNotification>();
+            return Array.Empty<NotificationEvent>();
         }
     }
 }

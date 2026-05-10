@@ -97,6 +97,7 @@ public partial class App : Application
         var accountRepo = new AccountRepository(dbFactory);
         var repoRepo = new RepositoryRepository(dbFactory);
         var notificationRepo = new NotificationRepository(dbFactory);
+        var eventRepo = new NotificationEventRepository(dbFactory);
         var syncStateRepo = new SyncStateRepository(dbFactory);
         var settingsRepo = new AppSettingsRepository(dbFactory);
 
@@ -114,6 +115,7 @@ public partial class App : Application
             accountRepo,
             repoRepo,
             notificationRepo,
+            eventRepo,
             syncStateRepo,
             apiClient,
             clock,
@@ -130,6 +132,7 @@ public partial class App : Application
         {
             return new TimelineItemContext(
                 Repository: notificationRepo,
+                EventRepository: eventRepo,
                 Api: apiClient,
                 Browser: browser,
                 Clipboard: clipboard,
@@ -144,9 +147,9 @@ public partial class App : Application
                 Log: _logger);
         }
 
-        // 9. Timeline service backed by the real cache.
+        // 9. Timeline service backed by the event-log cache.
         var timelineService = new DbBackedTimelineService(
-            notificationRepo,
+            eventRepo,
             repoRepo,
             accountRepo,
             ItemCtxFactory,

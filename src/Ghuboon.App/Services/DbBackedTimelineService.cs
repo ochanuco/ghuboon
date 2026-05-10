@@ -11,22 +11,30 @@ namespace Ghuboon.App.Services;
 
 /// <summary>
 /// Production <see cref="ITimelineService"/> backed by the encrypted SQLite cache.
-/// Loads notifications for the configured primary account and applies the
-/// <see cref="TimelineFilter"/> in memory: tab filter (Phase 9), repo dropdown,
-/// and free-text search.
+/// Loads the per-update event log for the configured primary account and applies
+/// the <see cref="TimelineFilter"/> in memory: tab filter (Phase 9), repo
+/// dropdown, and free-text search.
 ///
-/// Issue #8: returns domain <see cref="GitHubNotification"/> rows. The
-/// presentation layer is responsible for mapping to view-models. The
-/// per-row <see cref="TimelineItemContext"/> factory is preserved for backwards
-/// compatibility but is no longer used internally; callers that previously
-/// passed a factory can drop it.
+/// Event-log timeline: rows are <see cref="NotificationEvent"/> instances drawn
+/// from <see cref="INotificationEventRepository"/>, so a thread that updates
+/// multiple times produces multiple rows. The presentation layer maps each
+/// event to a <see cref="TimelineItemViewModel"/>.
 /// </summary>
 public sealed class DbBackedTimelineService : ITimelineService
 {
-    private readonly INotificationRepository _notifications;
+    /// <summary>
+    /// Page size for <see cref="LoadAsync"/>. The event log is append-only, so
+    /// without an upper bound the timeline grows indefinitely as syncs run.
+    /// 200 rows comfortably covers the visible window while keeping the
+    /// in-memory filter pipeline cheap.
+    /// </summary>
+    public const int DefaultLimit = 200;
+
+    private readonly INotificationEventRepository _events;
     private readonly IRepositoryRepository _repositories;
     private readonly IAccountRepository _accounts;
     private readonly string _accountId;
+    private readonly int _limit;
 
     /// <summary>
     /// Optional factory for the per-row VM context. Retained so existing callers
@@ -37,26 +45,28 @@ public sealed class DbBackedTimelineService : ITimelineService
     public Func<TimelineItemContext> ItemContextFactory { get; }
 
     public DbBackedTimelineService(
-        INotificationRepository notifications,
+        INotificationEventRepository events,
         IRepositoryRepository repositories,
         IAccountRepository accounts,
         Func<TimelineItemContext>? itemContextFactory = null,
-        string accountId = AppSettingsService.PrimaryAccountId)
+        string accountId = AppSettingsService.PrimaryAccountId,
+        int limit = DefaultLimit)
     {
-        _notifications = notifications ?? throw new ArgumentNullException(nameof(notifications));
+        _events = events ?? throw new ArgumentNullException(nameof(events));
         _repositories = repositories ?? throw new ArgumentNullException(nameof(repositories));
         _accounts = accounts ?? throw new ArgumentNullException(nameof(accounts));
         ItemContextFactory = itemContextFactory ?? (() => TimelineItemContext.Empty);
         _accountId = accountId;
+        _limit = limit;
     }
 
-    public async Task<IReadOnlyList<GitHubNotification>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
+    public async Task<IReadOnlyList<NotificationEvent>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(filter);
 
-        var rows = await _notifications.ListByAccountAsync(_accountId, ct).ConfigureAwait(false);
+        var rows = await _events.ListByAccountAsync(_accountId, _limit, ct).ConfigureAwait(false);
 
-        IEnumerable<GitHubNotification> q = rows;
+        IEnumerable<NotificationEvent> q = rows;
 
         // Tab filter.
         q = q.Where(n => MatchesTab(n.Reason, filter.Tab));
@@ -80,7 +90,9 @@ public sealed class DbBackedTimelineService : ITimelineService
                 || Contains(n.Subject.Type, needle));
         }
 
-        return q.OrderByDescending(n => n.UpdatedAt).ToList();
+        // ListByAccountAsync already orders by observed_at DESC; the in-memory
+        // filter chain preserves order so newest events stay first.
+        return q.ToList();
     }
 
     public async Task<IReadOnlyList<RepositoryRef>> ListRepositoriesAsync(CancellationToken ct = default)
@@ -89,8 +101,8 @@ public sealed class DbBackedTimelineService : ITimelineService
         return repos.OrderBy(r => r.FullName, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    public IReadOnlyList<GitHubNotification> GetPlaceholderItems() =>
-        Array.Empty<GitHubNotification>();
+    public IReadOnlyList<NotificationEvent> GetPlaceholderItems() =>
+        Array.Empty<NotificationEvent>();
 
     public static bool MatchesTab(NotificationReason reason, TimelineTab tab) => tab switch
     {

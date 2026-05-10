@@ -55,6 +55,80 @@ internal sealed class FakeNotificationRepository : INotificationRepository
     }
 }
 
+/// <summary>
+/// In-memory <see cref="INotificationEventRepository"/> for the App-layer tests.
+/// Mirrors the production semantics: <see cref="TryAppendAsync"/> dedups on
+/// (account_id, notification_id, source_updated_at) and
+/// <see cref="MarkThreadAsReadAsync"/> flips every sibling event row.
+/// </summary>
+internal sealed class FakeNotificationEventRepository : INotificationEventRepository
+{
+    public List<NotificationEvent> Events { get; } = new();
+    public int AppendCallCount { get; private set; }
+    public int MarkReadCallCount { get; private set; }
+    private long _nextId = 1;
+
+    public Task<bool> TryAppendAsync(NotificationEvent ev, CancellationToken ct = default)
+    {
+        AppendCallCount++;
+        if (Events.Any(e => e.AccountId == ev.AccountId
+                            && e.NotificationId == ev.NotificationId
+                            && e.SourceUpdatedAt == ev.SourceUpdatedAt))
+        {
+            return Task.FromResult(false);
+        }
+
+        var assigned = ev.Id > 0 ? ev : new NotificationEvent(
+            Id: _nextId++,
+            AccountId: ev.AccountId,
+            NotificationId: ev.NotificationId,
+            ThreadId: ev.ThreadId,
+            RepositoryFullName: ev.RepositoryFullName,
+            Subject: ev.Subject,
+            Reason: ev.Reason,
+            SourceUpdatedAt: ev.SourceUpdatedAt,
+            ObservedAt: ev.ObservedAt,
+            Unread: ev.Unread,
+            LastReadAt: ev.LastReadAt,
+            RawJson: ev.RawJson);
+        Events.Add(assigned);
+        return Task.FromResult(true);
+    }
+
+    public Task<IReadOnlyList<NotificationEvent>> ListByAccountAsync(string accountId, int limit, CancellationToken ct = default)
+    {
+        IReadOnlyList<NotificationEvent> list = Events
+            .Where(e => e.AccountId == accountId)
+            .OrderByDescending(e => e.ObservedAt)
+            .ThenByDescending(e => e.Id)
+            .Take(limit)
+            .ToList();
+        return Task.FromResult(list);
+    }
+
+    public Task<int> MarkThreadAsReadAsync(string accountId, string notificationId, DateTimeOffset readAt, CancellationToken ct = default)
+    {
+        MarkReadCallCount++;
+        var affected = 0;
+        for (var i = 0; i < Events.Count; i++)
+        {
+            var e = Events[i];
+            if (e.AccountId == accountId && e.NotificationId == notificationId)
+            {
+                Events[i] = e with { Unread = false, LastReadAt = readAt };
+                affected++;
+            }
+        }
+        return Task.FromResult(affected);
+    }
+
+    public Task<int> DeleteOlderThanAsync(DateTimeOffset cutoff, CancellationToken ct = default)
+    {
+        var removed = Events.RemoveAll(e => e.ObservedAt < cutoff);
+        return Task.FromResult(removed);
+    }
+}
+
 internal sealed class FakeRepositoryRepository : IRepositoryRepository
 {
     public List<RepositoryRef> Repositories { get; } = new();
@@ -221,5 +295,46 @@ internal static class TimelineTestData
             unread,
             updatedAt,
             null);
+    }
+
+    /// <summary>
+    /// Test-side <see cref="NotificationEvent"/> factory mirroring
+    /// <see cref="Build(string, string, string, string, NotificationReason, bool, DateTimeOffset, string, string?, string?)"/>'s
+    /// signature so call sites can swap from the GitHubNotification fixture to
+    /// the event fixture without rewriting the call.
+    /// </summary>
+    public static NotificationEvent BuildEvent(
+        long eventId,
+        string id,
+        string accountId,
+        string repo,
+        string title,
+        NotificationReason reason,
+        bool unread,
+        DateTimeOffset updatedAt,
+        string subjectType = "PullRequest",
+        string? webUrl = null,
+        string? threadId = null,
+        DateTimeOffset? observedAt = null)
+    {
+        if (threadId is null)
+        {
+            var sep = id.IndexOf(':');
+            threadId = sep >= 0 ? id[(sep + 1)..] : id;
+        }
+
+        return new NotificationEvent(
+            Id: eventId,
+            AccountId: accountId,
+            NotificationId: id,
+            ThreadId: threadId,
+            RepositoryFullName: repo,
+            Subject: new NotificationSubject(subjectType, title, null, webUrl),
+            Reason: reason,
+            SourceUpdatedAt: updatedAt,
+            ObservedAt: observedAt ?? updatedAt,
+            Unread: unread,
+            LastReadAt: null,
+            RawJson: "{}");
     }
 }

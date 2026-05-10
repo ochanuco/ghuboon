@@ -16,6 +16,11 @@ namespace Ghuboon.App.ViewModels;
 /// instance and reuse it across rows without ballooning the VM constructor.
 /// </summary>
 /// <param name="Repository">Local cache repo, used to mirror read-state changes back into SQLite.</param>
+/// <param name="EventRepository">
+/// Optional event-log repo: when set, a successful mark-as-read also flips
+/// every sibling event row for the same thread, so the timeline UI does not
+/// keep showing past observations as unread after the user resolves a thread.
+/// </param>
 /// <param name="Api">Used to push read-state to GitHub.com.</param>
 /// <param name="Browser">Used by Open in GitHub.</param>
 /// <param name="Clipboard">Used by Copy URL.</param>
@@ -31,6 +36,7 @@ namespace Ghuboon.App.ViewModels;
 /// <param name="Log">Logger; null disables logging from this row.</param>
 public sealed record TimelineItemContext(
     INotificationRepository? Repository,
+    INotificationEventRepository? EventRepository,
     IGitHubApiClient? Api,
     IBrowserService? Browser,
     IClipboardService? Clipboard,
@@ -40,7 +46,7 @@ public sealed record TimelineItemContext(
     ILogger? Log)
 {
     public static TimelineItemContext Empty { get; } =
-        new(null, null, null, null, null, null, null, null);
+        new(null, null, null, null, null, null, null, null, null);
 }
 
 /// <summary>
@@ -75,6 +81,7 @@ public partial class TimelineItemViewModel : ViewModelBase
         _ctx = context ?? TimelineItemContext.Empty;
 
         Id = source.Id;
+        NotificationId = source.Id;
         ThreadId = source.ThreadId;
         AccountId = source.AccountId;
         RepositoryFullName = source.RepositoryFullName;
@@ -84,6 +91,40 @@ public partial class TimelineItemViewModel : ViewModelBase
         SubjectType = source.Subject.Type;
         WebUrl = source.Subject.WebUrl;
         UpdatedAt = source.UpdatedAt;
+        _unread = source.Unread;
+    }
+
+    /// <summary>
+    /// Build from an event-log row (event-log timeline path). Each event is its
+    /// own row, so <see cref="Id"/> is the event id (prefixed with <c>"evt:"</c>)
+    /// rather than the notification id — this stops Avalonia's ListBox key
+    /// tracking from collapsing two rows that happen to share a thread.
+    /// <see cref="NotificationId"/> still carries the underlying thread's
+    /// notification id so mark-as-read can flip every sibling event.
+    /// </summary>
+    public TimelineItemViewModel(NotificationEvent source, TimelineItemContext context)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        _ctx = context ?? TimelineItemContext.Empty;
+
+        // Use the event's local autoincrement id so two rows for the same
+        // thread don't get treated as duplicates by the ListBox virtualization
+        // layer. NotificationId stays equal to the underlying thread's
+        // notification id so mark-as-read can flip every sibling event.
+        Id = source.Id > 0 ? $"evt:{source.Id}" : source.NotificationId;
+        NotificationId = source.NotificationId;
+        ThreadId = source.ThreadId;
+        AccountId = source.AccountId;
+        RepositoryFullName = source.RepositoryFullName;
+        Title = source.Subject.Title;
+        Reason = source.Reason;
+        ReasonRaw = source.Reason.ToString();
+        SubjectType = source.Subject.Type;
+        WebUrl = source.Subject.WebUrl;
+        // Display the upstream updated_at for this observation: that is the
+        // "when did this event happen" timestamp users expect on a per-row
+        // event log (not when our sync wrote the row).
+        UpdatedAt = source.SourceUpdatedAt;
         _unread = source.Unread;
     }
 
@@ -116,6 +157,13 @@ public partial class TimelineItemViewModel : ViewModelBase
         => new(id, repositoryFullName, title, reason, updatedAt, unread);
 
     public string Id { get; }
+
+    /// <summary>
+    /// Underlying notification id ("{AccountId}:{ThreadId}") for this row. When
+    /// the row is built from an event, multiple rows can share this id but
+    /// have distinct <see cref="Id"/> values (event-id prefixed with "evt:").
+    /// </summary>
+    public string NotificationId { get; } = string.Empty;
     public string ThreadId { get; } = string.Empty;
     public string AccountId { get; } = string.Empty;
     public string RepositoryFullName { get; }
@@ -182,12 +230,12 @@ public partial class TimelineItemViewModel : ViewModelBase
 
             var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
 
-            if (_ctx.Repository is not null && !string.IsNullOrEmpty(Id) && !string.IsNullOrEmpty(AccountId))
+            if (_ctx.Repository is not null && !string.IsNullOrEmpty(NotificationId) && !string.IsNullOrEmpty(AccountId))
             {
                 try
                 {
                     var updated = new GitHubNotification(
-                        Id,
+                        NotificationId,
                         AccountId,
                         ThreadId,
                         RepositoryFullName,
@@ -200,7 +248,26 @@ public partial class TimelineItemViewModel : ViewModelBase
                 }
                 catch (Exception ex)
                 {
-                    _ctx.Log?.Warning(ex, "Persisting local read state failed for {Id}", Id);
+                    _ctx.Log?.Warning(ex, "Persisting local read state failed for {Id}", NotificationId);
+                }
+            }
+
+            // Event-log timeline: flip every sibling event row for the same
+            // thread so the timeline does not keep showing prior observations
+            // as unread after the user resolves a thread. Failure here is
+            // logged but non-fatal — the latest state in `notifications` is
+            // already advanced and the next sync will reconcile.
+            if (_ctx.EventRepository is not null && !string.IsNullOrEmpty(NotificationId) && !string.IsNullOrEmpty(AccountId))
+            {
+                try
+                {
+                    await _ctx.EventRepository
+                        .MarkThreadAsReadAsync(AccountId, NotificationId, now, ct)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _ctx.Log?.Warning(ex, "Marking event-log siblings read failed for {NotificationId}", NotificationId);
                 }
             }
 
