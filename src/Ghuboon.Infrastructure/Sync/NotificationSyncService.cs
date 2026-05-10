@@ -220,16 +220,29 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                     RateLimitRemaining = response.RateLimit.Remaining,
                     RateLimitResetAt = response.RateLimit.ResetAt,
                 }, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger?.Warning(ex, "Post-304 sync-state persistence failed");
+                var dbResult = new SyncResult(false, 0, 0, 0, ErrorCategory.Database, ex.Message, response.RateLimit);
+                RaiseProgress(accountId, SyncStage.Failed, dbResult);
+                return dbResult;
+            }
 
-                RaiseProgress(accountId, SyncStage.Pruning, null);
+            // Pruning is best-effort on the 304 path too — matches the
+            // non-304 path below so a prune-only failure can never flip a
+            // successful sync into a failed result. The data we just
+            // confirmed-fresh is already persisted by the etag bookkeeping
+            // above; deletion of stale rows is a janitor task that retries
+            // on the next sync.
+            RaiseProgress(accountId, SyncStage.Pruning, null);
+            try
+            {
                 await PruneAsync(now, ct).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger?.Warning(ex, "Post-304 bookkeeping failed");
-                var dbResult = new SyncResult(false, 0, 0, 0, ErrorCategory.Database, ex.Message, response.RateLimit);
-                RaiseProgress(accountId, SyncStage.Failed, dbResult);
-                return dbResult;
+                _logger?.Warning(ex, "Post-304 cache prune failed");
             }
 
             var notModifiedResult = new SyncResult(true, 0, 0, 0, null, null, response.RateLimit);

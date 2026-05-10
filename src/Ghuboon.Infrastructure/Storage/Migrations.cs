@@ -426,5 +426,22 @@ internal static class Migrations
                  ALTER TABLE notifications ADD COLUMN latest_comment_url TEXT;
                  ALTER TABLE notification_events ADD COLUMN latest_comment_url TEXT;
                  """),
+
+        // ----------------------------------------------------------------
+        // Migration v7 (mark-as-read index):
+        //   MarkThreadAsReadAsync flips every sibling event row for a
+        //   thread by (account_id, notification_id) — the existing v3
+        //   indexes only cover the listing pager and the unique dedup, so
+        //   the UPDATE walked the whole append-only table. As notification
+        //   events accumulate (one row per observed update, retained 30
+        //   days) every read action grew slower. Add a covering index so
+        //   the UPDATE plan stays O(matches) rather than O(table).
+        new Migration(
+            Version: 7,
+            Name: "events_mark_read_index",
+            Sql: """
+                 CREATE INDEX IF NOT EXISTS ix_events_account_notification
+                   ON notification_events(account_id, notification_id);
+                 """),
     };
 }
