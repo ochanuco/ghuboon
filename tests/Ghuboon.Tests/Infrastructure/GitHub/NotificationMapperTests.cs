@@ -176,4 +176,80 @@ public class NotificationMapperTests
 
         Assert.Single(mapped);
     }
+
+    [Fact]
+    public void MapList_validates_accountId_before_dtos()
+    {
+        // Issue #11: when both accountId and dtos are problematic, the accountId guard
+        // must fire first so a missing/empty accountId never silently no-ops because
+        // the collection is empty.
+        Assert.Throws<ArgumentException>(() =>
+            NotificationMapper.Map(dtos: null!, accountId: ""));
+        Assert.Throws<ArgumentException>(() =>
+            NotificationMapper.Map(dtos: null!, accountId: "   "));
+    }
+
+    [Fact]
+    public void MapList_throws_on_null_accountId()
+    {
+        // ArgumentException.ThrowIfNullOrWhiteSpace surfaces ArgumentNullException
+        // (a subclass of ArgumentException) for null inputs.
+        Assert.Throws<ArgumentNullException>(() =>
+            NotificationMapper.Map(dtos: Array.Empty<NotificationDto>(), accountId: null!));
+    }
+
+    [Fact]
+    public void Map_returns_null_when_owner_login_is_empty()
+    {
+        // Issue #11: an empty owner.login must NOT produce "/hello"; the mapper
+        // treats it as missing and skips the notification.
+        var dto = new NotificationDto(
+            Id: "10",
+            Repository: new RepositoryDto(FullName: null, Name: "hello", HtmlUrl: null, Owner: new OwnerDto("")),
+            Subject: new SubjectDto("x", "Issue", null, null),
+            Reason: "mention",
+            Unread: true,
+            UpdatedAt: DateTimeOffset.UnixEpoch,
+            LastReadAt: null);
+
+        var mapped = NotificationMapper.Map(dto, "acct");
+
+        Assert.Null(mapped);
+    }
+
+    [Fact]
+    public void Map_returns_null_when_owner_login_is_whitespace()
+    {
+        var dto = new NotificationDto(
+            Id: "11",
+            Repository: new RepositoryDto(FullName: null, Name: "hello", HtmlUrl: null, Owner: new OwnerDto("  ")),
+            Subject: new SubjectDto("x", "Issue", null, null),
+            Reason: "mention",
+            Unread: true,
+            UpdatedAt: DateTimeOffset.UnixEpoch,
+            LastReadAt: null);
+
+        var mapped = NotificationMapper.Map(dto, "acct");
+
+        Assert.Null(mapped);
+    }
+
+    [Fact]
+    public void Map_returns_null_when_repository_name_is_empty()
+    {
+        // Symmetric to the owner case: a notification with owner but empty repo name
+        // must not fabricate "octo/" as the full name.
+        var dto = new NotificationDto(
+            Id: "12",
+            Repository: new RepositoryDto(FullName: null, Name: "", HtmlUrl: null, Owner: new OwnerDto("octo")),
+            Subject: new SubjectDto("x", "Issue", null, null),
+            Reason: "mention",
+            Unread: true,
+            UpdatedAt: DateTimeOffset.UnixEpoch,
+            LastReadAt: null);
+
+        var mapped = NotificationMapper.Map(dto, "acct");
+
+        Assert.Null(mapped);
+    }
 }

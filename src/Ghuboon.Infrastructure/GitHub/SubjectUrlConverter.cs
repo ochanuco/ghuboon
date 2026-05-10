@@ -37,6 +37,9 @@ internal static class SubjectUrlConverter
 
         // Map API path segment -> web path segment.
         // pulls -> pull, issues -> issues, releases -> releases, commits -> commit.
+        // Unknown kinds return null so callers can fall back to repository.html_url
+        // rather than emitting a fabricated URL with an unmapped path segment
+        // (issue #11).
         var webKind = kind switch
         {
             "pulls" => "pull",
@@ -44,8 +47,13 @@ internal static class SubjectUrlConverter
             "releases" => "releases",
             "commits" => "commit",
             "discussions" => "discussions",
-            _ => kind,
+            _ => null,
         };
+
+        if (webKind is null)
+        {
+            return null;
+        }
 
         // Rebuild as github.com/{owner}/{repo}/{webKind}/{rest...}
         if (parts.Length == 3)

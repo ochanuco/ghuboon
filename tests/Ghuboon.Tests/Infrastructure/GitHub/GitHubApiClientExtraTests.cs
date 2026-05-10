@@ -118,18 +118,126 @@ public class GitHubApiClientExtraTests
     }
 
     [Fact]
-    public async Task MarkThreadReadAsync_NetworkException_PropagatesAsHttpRequestException()
+    public async Task MarkThreadReadAsync_NetworkException_MapsToGitHubApiExceptionNetwork()
     {
-        // Phase 15 finding: MarkThreadReadAsync does NOT translate HttpRequestException
-        // into GitHubApiException(ErrorCategory.Network) the way ValidateAsync /
-        // ListNotificationsAsync do. We pin down current behavior here so a future
-        // fix for issue #11 has a regression target.
+        // Issue #11: MarkThreadReadAsync now translates HttpRequestException to
+        // GitHubApiException(ErrorCategory.Network) so callers can react to the
+        // categorized error in the same way as ValidateAsync / ListNotificationsAsync.
         var handler = new TestHttpMessageHandler((req, ct) => throw new HttpRequestException("dns failure"));
         var http = new HttpClient(handler) { BaseAddress = new Uri(GitHubApiClient.DefaultBaseUrl) };
         var client = new GitHubApiClient(http, new LoggerConfiguration().CreateLogger());
 
-        // TODO(issue-11): once mark-read failures are mapped to GitHubApiException,
-        // tighten this assertion to expect the mapped exception + ErrorCategory.Network.
-        await Assert.ThrowsAsync<HttpRequestException>(() => client.MarkThreadReadAsync(Pat, "1234"));
+        var ex = await Assert.ThrowsAsync<GitHubApiException>(
+            () => client.MarkThreadReadAsync(Pat, "1234"));
+        Assert.Equal(ErrorCategory.Network, ex.Category);
+        Assert.Equal(0, ex.StatusCode);
+        Assert.IsType<HttpRequestException>(ex.InnerException);
+    }
+
+    [Fact]
+    public async Task ListNotificationsAsync_NetworkException_MapsToGitHubApiExceptionNetwork()
+    {
+        // Issue #11: ListNotificationsAsync wraps HttpRequestException in the same
+        // GitHubApiException(Network) shape as MarkThreadReadAsync / ValidateAsync.
+        var handler = new TestHttpMessageHandler((req, ct) => throw new HttpRequestException("connection refused"));
+        var http = new HttpClient(handler) { BaseAddress = new Uri(GitHubApiClient.DefaultBaseUrl) };
+        var client = new GitHubApiClient(http, new LoggerConfiguration().CreateLogger());
+
+        var ex = await Assert.ThrowsAsync<GitHubApiException>(
+            () => client.ListNotificationsAsync(Pat, new NotificationsRequest()));
+        Assert.Equal(ErrorCategory.Network, ex.Category);
+        Assert.Equal(0, ex.StatusCode);
+        Assert.IsType<HttpRequestException>(ex.InnerException);
+    }
+
+    [Fact]
+    public async Task ListNotificationsAsync_TimeoutException_MapsToGitHubApiExceptionNetwork()
+    {
+        // Timeouts surface as TaskCanceledException without an associated user CT;
+        // the client must categorize them as Network rather than letting them bubble.
+        var handler = new TestHttpMessageHandler((req, ct) =>
+            throw new TaskCanceledException("HttpClient timeout"));
+        var http = new HttpClient(handler) { BaseAddress = new Uri(GitHubApiClient.DefaultBaseUrl) };
+        var client = new GitHubApiClient(http, new LoggerConfiguration().CreateLogger());
+
+        var ex = await Assert.ThrowsAsync<GitHubApiException>(
+            () => client.ListNotificationsAsync(Pat, new NotificationsRequest()));
+        Assert.Equal(ErrorCategory.Network, ex.Category);
+    }
+
+    [Fact]
+    public async Task ListNotificationsAsync_UserCancellation_PropagatesAsOperationCanceled()
+    {
+        // Issue #11: when the caller's CT is cancelled, the OperationCanceledException
+        // must propagate cleanly rather than being remapped to Network.
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var handler = new TestHttpMessageHandler((req, ct) =>
+        {
+            ct.ThrowIfCancellationRequested();
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
+        });
+        var http = new HttpClient(handler) { BaseAddress = new Uri(GitHubApiClient.DefaultBaseUrl) };
+        var client = new GitHubApiClient(http, new LoggerConfiguration().CreateLogger());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.ListNotificationsAsync(Pat, new NotificationsRequest(), cts.Token));
+    }
+
+    [Fact]
+    public async Task MarkThreadReadAsync_UserCancellation_PropagatesAsOperationCanceled()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var handler = new TestHttpMessageHandler((req, ct) =>
+        {
+            ct.ThrowIfCancellationRequested();
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ResetContent));
+        });
+        var http = new HttpClient(handler) { BaseAddress = new Uri(GitHubApiClient.DefaultBaseUrl) };
+        var client = new GitHubApiClient(http, new LoggerConfiguration().CreateLogger());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.MarkThreadReadAsync(Pat, "1234", cts.Token));
+    }
+
+    [Fact]
+    public async Task ListNotifications_RateLimitReset_OutOfRangeValue_LeavesResetAtNull()
+    {
+        // Issue #11: a ridiculously large or negative X-RateLimit-Reset value must
+        // not crash the client. The header is parsed defensively; resetAt stays null
+        // when the value is outside DateTimeOffset.FromUnixTimeSeconds's domain.
+        var (client, _) = Build(_ =>
+        {
+            var msg = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("[]", Encoding.UTF8, "application/json"),
+            };
+            // Way past 253402300799 (year 9999-12-31 23:59:59 UTC).
+            msg.Headers.TryAddWithoutValidation("X-RateLimit-Reset", "999999999999999");
+            return msg;
+        });
+
+        var resp = await client.ListNotificationsAsync(Pat, new NotificationsRequest());
+
+        Assert.Null(resp.RateLimit.ResetAt);
+    }
+
+    [Fact]
+    public async Task ListNotifications_RateLimitReset_NegativeValue_LeavesResetAtNull()
+    {
+        var (client, _) = Build(_ =>
+        {
+            var msg = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("[]", Encoding.UTF8, "application/json"),
+            };
+            msg.Headers.TryAddWithoutValidation("X-RateLimit-Reset", "-1");
+            return msg;
+        });
+
+        var resp = await client.ListNotificationsAsync(Pat, new NotificationsRequest());
+
+        Assert.Null(resp.RateLimit.ResetAt);
     }
 }
