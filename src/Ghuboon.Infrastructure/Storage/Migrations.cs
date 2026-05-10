@@ -347,5 +347,44 @@ internal static class Migrations
                  CREATE UNIQUE INDEX ux_events_dedup
                    ON notification_events(account_id, notification_id, source_updated_at);
                  """),
+
+        // ----------------------------------------------------------------
+        // Migration v4 (event log backfill):
+        //   v3 introduced notification_events but only newly upserted
+        //   notifications append events. Existing cached notifications (from
+        //   pre-v3 fetches) had no event rows, so the timeline rendered
+        //   empty until a fresh upstream change came in. This migration
+        //   seeds one event per existing notification using its latest
+        //   updated_at as the source_updated_at and synced_at (or
+        //   updated_at as a fallback) as the observed_at. The UNIQUE
+        //   (account_id, notification_id, source_updated_at) index makes
+        //   the INSERT OR IGNORE idempotent — if v3 already wrote an
+        //   identical row it is skipped here.
+        new Migration(
+            Version: 4,
+            Name: "notification_events_backfill",
+            Sql: """
+                 INSERT OR IGNORE INTO notification_events (
+                   account_id, notification_id, thread_id, repository_full_name,
+                   subject_type, subject_title, subject_api_url, web_url, reason,
+                   source_updated_at, observed_at, unread, last_read_at, raw_json
+                 )
+                 SELECT
+                   account_id,
+                   id AS notification_id,
+                   thread_id,
+                   repository_full_name,
+                   subject_type,
+                   subject_title,
+                   subject_api_url,
+                   web_url,
+                   reason,
+                   updated_at AS source_updated_at,
+                   COALESCE(synced_at, updated_at) AS observed_at,
+                   unread,
+                   last_read_at,
+                   raw_json
+                 FROM notifications;
+                 """),
     };
 }

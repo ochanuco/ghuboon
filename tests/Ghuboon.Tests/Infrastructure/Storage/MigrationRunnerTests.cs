@@ -18,7 +18,7 @@ public class MigrationRunnerTests
         // Migration v3 adds the notification_events table that backs the
         // event-log timeline; v1 and v2 establish the rest of the schema and
         // FK constraints. All three versions land on a fresh open.
-        Assert.Equal(new[] { 1, 2, 3 }, versions);
+        Assert.Equal(new[] { 1, 2, 3, 4 }, versions);
 
         var tableNames = (await connection.QueryAsync<string>(
                 "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"))
@@ -57,7 +57,7 @@ public class MigrationRunnerTests
                 "SELECT version FROM _schema_migrations ORDER BY version;"))
             .ToList();
 
-        Assert.Equal(new[] { 1, 2, 3 }, versions);
+        Assert.Equal(new[] { 1, 2, 3, 4 }, versions);
     }
 
     [Fact]
@@ -479,13 +479,14 @@ public class MigrationRunnerTests
         }
 
         // Now run the full migration runner against the legacy DB. It should
-        // detect that v1 is already recorded and apply v2 + v3 (the latter
-        // adds the event-log table that backs the timeline UI).
+        // detect that v1 is already recorded and apply v2, v3, and v4.
+        // v3 adds the event-log table; v4 backfills events for already-cached
+        // notifications so the timeline isn't empty after the schema change.
         var runner = new MigrationRunner();
         await using (var conn = await temp.RawFactory.OpenAsync())
         {
             var applied = await runner.RunAsync(conn);
-            Assert.Equal(new[] { 2, 3 }, applied.ToArray());
+            Assert.Equal(new[] { 2, 3, 4 }, applied.ToArray());
         }
 
         // Verify post-migration state.
