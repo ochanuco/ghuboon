@@ -224,7 +224,9 @@
                                Opacity="0.5"
                                FontStyle="Italic"
                                IsVisible="{Binding HasNoBodyAfterLoad, FallbackValue=False}" />
-                    <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+                    <ScrollViewer x:Name="DetailScrollViewer"
+                                  Focusable="True"
+                                  HorizontalScrollBarVisibility="Disabled"
                                   VerticalScrollBarVisibility="Auto"
                                   IsVisible="{Binding Body, Converter={x:Static StringConverters.IsNotNullOrEmpty}, FallbackValue=False}">
                         <ItemsControl ItemsSource="{Binding BodyBlocks}">
