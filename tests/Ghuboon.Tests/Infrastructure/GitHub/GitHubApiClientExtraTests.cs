@@ -2,6 +2,7 @@ using System;
 using System.Net;
 using System.Net.Http;
 using System.Text;
+using System.Text.Json;
 using Ghuboon.Core.Abstractions;
 using Ghuboon.Infrastructure.GitHub;
 using Serilog;
@@ -53,12 +54,15 @@ public class GitHubApiClientExtraTests
         // Current behavior: an unparseable JSON body bubbles up as a JsonException
         // (wrapped or raw) rather than being mapped into a GitHubApiException with
         // ApiCompatibility category. Documented as a gap; see notes.
+        // Issue #27: tighten the assertion from ThrowsAnyAsync<Exception> so the
+        // test actually pins the failure mode — a fundamentally different
+        // exception (e.g. accidental NRE) would otherwise pass.
         var (client, _) = Build(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent("{ this is not valid JSON ]", Encoding.UTF8, "application/json"),
         });
 
-        await Assert.ThrowsAnyAsync<Exception>(() =>
+        await Assert.ThrowsAsync<JsonException>(() =>
             client.ListNotificationsAsync(Pat, new NotificationsRequest()));
     }
 
@@ -155,6 +159,9 @@ public class GitHubApiClientExtraTests
     {
         // Timeouts surface as TaskCanceledException without an associated user CT;
         // the client must categorize them as Network rather than letting them bubble.
+        // Issue #33: assert the full mapping shape (StatusCode == 0, InnerException
+        // preserved as TaskCanceledException) so the test cannot regress to
+        // dropping context the way the HttpRequestException test catches.
         var handler = new TestHttpMessageHandler((req, ct) =>
             throw new TaskCanceledException("HttpClient timeout"));
         var http = new HttpClient(handler) { BaseAddress = new Uri(GitHubApiClient.DefaultBaseUrl) };
@@ -163,6 +170,8 @@ public class GitHubApiClientExtraTests
         var ex = await Assert.ThrowsAsync<GitHubApiException>(
             () => client.ListNotificationsAsync(Pat, new NotificationsRequest()));
         Assert.Equal(ErrorCategory.Network, ex.Category);
+        Assert.Equal(0, ex.StatusCode);
+        Assert.IsType<TaskCanceledException>(ex.InnerException);
     }
 
     [Fact]
