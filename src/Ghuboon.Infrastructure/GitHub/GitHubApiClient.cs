@@ -193,6 +193,98 @@ public sealed class GitHubApiClient : IGitHubApiClient
         }
     }
 
+    public async Task<string?> GetSubjectBodyAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pat);
+        if (string.IsNullOrWhiteSpace(subjectApiUrl))
+        {
+            return null;
+        }
+
+        if (!Uri.TryCreate(subjectApiUrl, UriKind.Absolute, out var absolute))
+        {
+            return null;
+        }
+
+        // Build a fresh request bypassing the BaseAddress; subject_url is a fully
+        // qualified GitHub API URL pointing at /repos/{owner}/{repo}/{pulls|issues|...}/{n}
+        // (or comment / commit / discussion variants).
+        using var req = new HttpRequestMessage(HttpMethod.Get, absolute);
+        req.Headers.UserAgent.ParseAdd(UserAgent);
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(AcceptMediaType));
+        req.Headers.TryAddWithoutValidation(ApiVersionHeader, ApiVersion);
+        req.Headers.Authorization = new AuthenticationHeaderValue("token", pat);
+
+        try
+        {
+            using var response = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                _log.Information("GetSubjectBody non-success status {StatusCode}", (int)response.StatusCode);
+                return null;
+            }
+
+            using var doc = await JsonDocument.ParseAsync(
+                await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false),
+                cancellationToken: ct).ConfigureAwait(false);
+
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            // PullRequest / Issue / Comment / Discussion all carry "body".
+            // Release uses "body" too; commits use "commit.message" but we
+            // surface only "body" for MVP simplicity.
+            if (doc.RootElement.TryGetProperty("body", out var body) && body.ValueKind == JsonValueKind.String)
+            {
+                return body.GetString();
+            }
+
+            return null;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _log.Information(ex, "GetSubjectBody failed (non-fatal)");
+            return null;
+        }
+    }
+
+    public async Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pat);
+        ArgumentException.ThrowIfNullOrWhiteSpace(threadId);
+
+        using var req = BuildRequest(HttpMethod.Get, $"notifications/threads/{Uri.EscapeDataString(threadId)}", pat);
+        try
+        {
+            using var response = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                _log.Information("GetThreadSubjectUrl non-success status {StatusCode}", (int)response.StatusCode);
+                return null;
+            }
+            using var doc = await JsonDocument.ParseAsync(
+                await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false),
+                cancellationToken: ct).ConfigureAwait(false);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+            if (doc.RootElement.TryGetProperty("subject", out var subj)
+                && subj.ValueKind == JsonValueKind.Object
+                && subj.TryGetProperty("url", out var url)
+                && url.ValueKind == JsonValueKind.String)
+            {
+                return url.GetString();
+            }
+            return null;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex) { _log.Information(ex, "GetThreadSubjectUrl failed (non-fatal)"); return null; }
+    }
+
     private static HttpRequestMessage BuildRequest(HttpMethod method, string relativePath, string pat)
     {
         var req = new HttpRequestMessage(method, relativePath);

@@ -28,6 +28,23 @@ public interface IGitHubApiClient
     /// <c>PATCH /notifications/threads/{thread_id}</c>.
     /// </summary>
     Task MarkThreadReadAsync(string pat, string threadId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Fetches the body of a notification subject via the API URL on the
+    /// notification's <c>subject.url</c>. For PullRequest / Issue subjects this
+    /// returns the description; for Comment-typed subjects returns the latest
+    /// comment body. Returns null if the subject doesn't expose a body or the
+    /// fetch fails (callers display a placeholder).
+    /// </summary>
+    Task<string?> GetSubjectBodyAsync(string pat, string subjectApiUrl, CancellationToken ct = default);
+
+    /// <summary>
+    /// Fetches the notification thread metadata via
+    /// <c>GET /notifications/threads/{thread_id}</c>. Used to recover the
+    /// <c>subject.url</c> for cached rows that lost it (legacy data).
+    /// Returns null on failure.
+    /// </summary>
+    Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default);
 }
 
 /// <summary>

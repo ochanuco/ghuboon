@@ -33,6 +33,17 @@ public partial class TimelineViewModel : ViewModelBase
     [ObservableProperty]
     private bool _isLoading;
 
+    [ObservableProperty]
+    private TimelineItemViewModel? _selectedItem;
+
+    partial void OnSelectedItemChanged(TimelineItemViewModel? value)
+    {
+        if (value is null) return;
+        // Lazy-load the PR/Issue body for the detail pane. Fire-and-forget;
+        // EnsureBodyLoadedAsync swallows non-fatal errors and is idempotent.
+        _ = value.EnsureBodyLoadedAsync();
+    }
+
     public TimelineViewModel()
         : this(new StubTimelineService())
     {

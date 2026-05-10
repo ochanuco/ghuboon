@@ -15,7 +15,15 @@
         <vm:MainWindowViewModel/>
     </Design.DataContext>
 
-    <Grid RowDefinitions="Auto,Auto,*,Auto">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />   <!-- 0 top bar -->
+            <RowDefinition Height="*" />      <!-- 1 timeline -->
+            <RowDefinition Height="Auto" />   <!-- 2 tabs -->
+            <RowDefinition Height="Auto" />   <!-- 3 splitter -->
+            <RowDefinition Height="160" MinHeight="60" /> <!-- 4 detail (resizable) -->
+            <RowDefinition Height="Auto" />   <!-- 5 status -->
+        </Grid.RowDefinitions>
 
         <!-- Top bar -->
         <Border Grid.Row="0" Padding="12,8" BorderThickness="0,0,0,1" BorderBrush="#33000000">
@@ -63,14 +71,21 @@
             </Grid>
         </Border>
 
-        <!-- Tabs -->
-        <ListBox Grid.Row="1"
+        <!-- Body: timeline (or full-window settings) -->
+        <Panel Grid.Row="1">
+            <ContentControl IsVisible="{Binding !IsSettingsVisible}"
+                            Content="{Binding Timeline}" />
+        </Panel>
+
+        <!-- Tabs (sit just below the timeline, Tween-style) -->
+        <ListBox Grid.Row="2"
                  ItemsSource="{Binding Tabs}"
                  SelectedItem="{Binding SelectedTab}"
                  Padding="8,4"
-                 BorderThickness="0,0,0,1"
+                 BorderThickness="0,1,0,0"
                  BorderBrush="#22000000"
-                 Background="Transparent">
+                 Background="Transparent"
+                 IsVisible="{Binding !IsSettingsVisible}">
             <ListBox.ItemsPanel>
                 <ItemsPanelTemplate>
                     <StackPanel Orientation="Horizontal" Spacing="4" />
@@ -83,16 +98,95 @@
             </ListBox.ItemTemplate>
         </ListBox>
 
-        <!-- Body: timeline or settings -->
-        <Panel Grid.Row="2">
-            <ContentControl IsVisible="{Binding !IsSettingsVisible}"
-                            Content="{Binding Timeline}" />
-            <ContentControl IsVisible="{Binding IsSettingsVisible}"
-                            Content="{Binding Settings}" />
-        </Panel>
+        <!-- Splitter to resize the detail pane -->
+        <GridSplitter Grid.Row="3"
+                      Height="4"
+                      HorizontalAlignment="Stretch"
+                      ResizeDirection="Rows"
+                      Background="#11000000"
+                      IsVisible="{Binding !IsSettingsVisible}" />
+
+        <!-- Detail panel: title + body, action buttons bottom-right -->
+        <Border Grid.Row="4"
+                Padding="10,8"
+                BorderThickness="0,1,0,0"
+                BorderBrush="#22000000"
+                Background="#04000000"
+                IsVisible="{Binding !IsSettingsVisible}">
+            <Grid DataContext="{Binding Timeline.SelectedItem}"
+                  RowDefinitions="Auto,*,Auto">
+                <!-- Header: reason badge / repo / relative time -->
+                <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,*,Auto">
+                    <Border Grid.Column="0"
+                            Padding="6,1"
+                            CornerRadius="3"
+                            Background="{Binding ReasonBadgeColor, FallbackValue=#22000000}"
+                            IsVisible="{Binding ReasonBadgeText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <TextBlock Text="{Binding ReasonBadgeText}"
+                                   Foreground="White"
+                                   FontSize="10"
+                                   FontWeight="SemiBold" />
+                    </Border>
+                    <TextBlock Grid.Column="1"
+                               Margin="8,0,0,0"
+                               FontWeight="SemiBold"
+                               VerticalAlignment="Center"
+                               Text="{Binding RepositoryFullName, FallbackValue=''}" />
+                    <TextBlock Grid.Column="3"
+                               Opacity="0.7"
+                               FontSize="11"
+                               VerticalAlignment="Center"
+                               Text="{Binding RelativeTime, FallbackValue=''}" />
+                </Grid>
+
+                <!-- Title + body (scrollable) -->
+                <ScrollViewer Grid.Row="1"
+                              Margin="0,4,0,4"
+                              HorizontalScrollBarVisibility="Disabled"
+                              VerticalScrollBarVisibility="Auto">
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="{Binding Title, FallbackValue='Select a row to see details.'}"
+                                   FontSize="13"
+                                   FontWeight="SemiBold"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Text="Loading description…"
+                                   FontSize="12"
+                                   Opacity="0.6"
+                                   FontStyle="Italic"
+                                   IsVisible="{Binding IsLoadingBody, FallbackValue=False}" />
+                        <TextBlock Text="{Binding Body, FallbackValue=''}"
+                                   FontSize="12"
+                                   TextWrapping="Wrap"
+                                   IsVisible="{Binding Body, Converter={x:Static StringConverters.IsNotNullOrEmpty}, FallbackValue=False}" />
+                        <TextBlock Text="(no description / unsupported subject)"
+                                   FontSize="12"
+                                   Opacity="0.5"
+                                   FontStyle="Italic"
+                                   IsVisible="{Binding HasNoBodyAfterLoad, FallbackValue=False}" />
+                    </StackPanel>
+                </ScrollViewer>
+
+                <!-- Bottom-right action buttons -->
+                <StackPanel Grid.Row="2"
+                            Orientation="Horizontal"
+                            Spacing="6"
+                            HorizontalAlignment="Right"
+                            IsVisible="{Binding NotificationId, Converter={x:Static StringConverters.IsNotNullOrEmpty}, FallbackValue=False}">
+                    <Button Content="Open in GitHub"
+                            Command="{Binding OpenInGitHubCommand}"
+                            Padding="8,2" />
+                    <Button Content="Mark as read"
+                            Command="{Binding MarkAsReadCommand}"
+                            Padding="8,2" />
+                    <Button Content="Copy URL"
+                            Command="{Binding CopyUrlCommand}"
+                            Padding="8,2" />
+                </StackPanel>
+            </Grid>
+        </Border>
 
         <!-- Status bar (Phase 14) -->
-        <Border Grid.Row="3"
+        <Border Grid.Row="5"
                 Padding="10,4"
                 BorderThickness="0,1,0,0"
                 BorderBrush="#22000000"
@@ -151,5 +245,10 @@
                 </StackPanel>
             </Grid>
         </Border>
+
+        <!-- Settings full-window overlay -->
+        <ContentControl Grid.Row="1" Grid.RowSpan="5"
+                        IsVisible="{Binding IsSettingsVisible}"
+                        Content="{Binding Settings}" />
     </Grid>
 </Window>

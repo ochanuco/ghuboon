@@ -72,6 +72,26 @@ public partial class TimelineItemViewModel : ViewModelBase
     [ObservableProperty]
     private string? _flashMessage;
 
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasNoBodyAfterLoad))]
+    private string? _body;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasNoBodyAfterLoad))]
+    private bool _isLoadingBody;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasNoBodyAfterLoad))]
+    private bool _bodyLoaded;
+
+    private bool _bodyAttempted;
+
+    /// <summary>
+    /// True once body fetch has finished and produced no content. Used by the
+    /// detail pane to show "(no description)" rather than a blank space.
+    /// </summary>
+    public bool HasNoBodyAfterLoad => BodyLoaded && !IsLoadingBody && string.IsNullOrEmpty(Body);
+
     /// <summary>
     /// Build from a fully-populated cache entity (production path).
     /// </summary>
@@ -90,6 +110,7 @@ public partial class TimelineItemViewModel : ViewModelBase
         ReasonRaw = source.Reason.ToString();
         SubjectType = source.Subject.Type;
         WebUrl = source.Subject.WebUrl;
+        SubjectApiUrl = source.Subject.ApiUrl;
         UpdatedAt = source.UpdatedAt;
         _unread = source.Unread;
     }
@@ -121,6 +142,7 @@ public partial class TimelineItemViewModel : ViewModelBase
         ReasonRaw = source.Reason.ToString();
         SubjectType = source.Subject.Type;
         WebUrl = source.Subject.WebUrl;
+        SubjectApiUrl = source.Subject.ApiUrl;
         // Display the upstream updated_at for this observation: that is the
         // "when did this event happen" timestamp users expect on a per-row
         // event log (not when our sync wrote the row).
@@ -172,6 +194,7 @@ public partial class TimelineItemViewModel : ViewModelBase
     public string ReasonRaw { get; private set; }
     public string SubjectType { get; } = string.Empty;
     public string? WebUrl { get; }
+    public string? SubjectApiUrl { get; }
     public DateTimeOffset UpdatedAt { get; }
 
     public string ReasonBadgeText => FormatReasonBadge(Reason);
@@ -311,6 +334,80 @@ public partial class TimelineItemViewModel : ViewModelBase
     private void ToggleExpand()
     {
         IsExpanded = !IsExpanded;
+    }
+
+    /// <summary>
+    /// Lazy-fetch the PR/Issue/Comment body from GitHub for the detail panel.
+    /// Idempotent — guarded by <c>_bodyAttempted</c> so repeat selection of the
+    /// same row doesn't re-hit the API. Failures are silent (Body stays null).
+    /// </summary>
+    public async Task EnsureBodyLoadedAsync(CancellationToken ct = default)
+    {
+        if (_bodyAttempted) return;
+        _bodyAttempted = true;
+
+        // Fallback chain for legacy rows that lost SubjectApiUrl:
+        //  1) read the canonical notifications row from the cache
+        //  2) re-fetch via GET /notifications/threads/{thread_id} (reliable
+        //     even when the cache lost it on the first sync)
+        var apiUrl = SubjectApiUrl;
+        if (string.IsNullOrEmpty(apiUrl) && _ctx.Repository is { } repo)
+        {
+            try
+            {
+                var canonical = await repo.GetByIdAsync(NotificationId, ct).ConfigureAwait(true);
+                apiUrl = canonical?.Subject.ApiUrl;
+            }
+            catch { /* fallthrough to the network probe */ }
+        }
+
+        if (string.IsNullOrEmpty(apiUrl)
+            && _ctx.Api is { } api
+            && _ctx.PatProvider is { } provider
+            && !string.IsNullOrEmpty(ThreadId))
+        {
+            try
+            {
+                var pat = await provider(ct).ConfigureAwait(true);
+                if (!string.IsNullOrEmpty(pat))
+                {
+                    apiUrl = await api.GetThreadSubjectUrlAsync(pat, ThreadId, ct).ConfigureAwait(true);
+                }
+            }
+            catch { /* swallowed; we'll just show "(no description)" below */ }
+        }
+
+        if (_ctx.Api is null || _ctx.PatProvider is null || string.IsNullOrEmpty(apiUrl))
+        {
+            BodyLoaded = true;
+            return;
+        }
+
+        try
+        {
+            IsLoadingBody = true;
+            var pat = await _ctx.PatProvider(ct).ConfigureAwait(true);
+            if (string.IsNullOrEmpty(pat))
+            {
+                return;
+            }
+
+            Body = await _ctx.Api.GetSubjectBodyAsync(pat, apiUrl, ct).ConfigureAwait(true);
+            BodyLoaded = true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // ignore; selection moved before the fetch finished.
+            _bodyAttempted = false;
+        }
+        catch (Exception ex)
+        {
+            _ctx.Log?.Information(ex, "EnsureBodyLoadedAsync failed (non-fatal)");
+        }
+        finally
+        {
+            IsLoadingBody = false;
+        }
     }
 
     /// <summary>

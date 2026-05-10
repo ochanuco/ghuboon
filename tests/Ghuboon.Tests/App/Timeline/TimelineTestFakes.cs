@@ -217,6 +217,16 @@ internal sealed class FakeApiClient : IGitHubApiClient
         }
         MarkedReadThreads.Add(threadId);
     }
+
+    public Func<string, string?>? GetSubjectBodyOverride { get; set; }
+
+    public Task<string?> GetSubjectBodyAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+        => Task.FromResult(GetSubjectBodyOverride?.Invoke(subjectApiUrl));
+
+    public Func<string, string?>? GetThreadSubjectUrlOverride { get; set; }
+
+    public Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default)
+        => Task.FromResult(GetThreadSubjectUrlOverride?.Invoke(threadId));
 }
 
 internal sealed class FakeBrowser : IBrowserService
