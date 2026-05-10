@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using Ghuboon.App.ViewModels;
 using Ghuboon.Core.Domain;
@@ -89,13 +90,13 @@ public class TimelineItemViewModelExtraTests
     }
 
     [Fact]
-    public async Task MarkAsRead_ConcurrentExecutions_CurrentlyDoNotCoalesce()
+    public async Task MarkAsRead_ConcurrentExecutions_CoalesceToSingleApiCall()
     {
-        // Phase 15 finding: <see cref="TimelineItemViewModel"/> does NOT serialize
-        // overlapping mark-read calls. Both pass the "if (!Unread)" check while
-        // the first is still awaiting the API, so the API is called twice.
-        // We pin down current behavior; if the VM later adds an in-flight guard
-        // (or AllowConcurrentExecutions=false propagates), tighten this assertion.
+        // Issue #26: overlapping MarkAsRead invocations must collapse to a
+        // single GitHub API call. The fix uses
+        // [RelayCommand(AllowConcurrentExecutions = false)] so the second
+        // ExecuteAsync no-ops while the first is still in flight; the second
+        // call also sees Unread already cleared once the first completes.
         var (vm, _, api, _, _, _) = BuildVm(unread: true);
 
         var gate = new TaskCompletionSource();
@@ -108,8 +109,8 @@ public class TimelineItemViewModelExtraTests
         await Task.WhenAll(first, second);
 
         Assert.False(vm.Unread);
-        // TODO: collapse to a single API call if/when the VM adds idempotence
-        // around in-flight mark-read commands. Today both call sites fire.
-        Assert.Equal(2, api.MarkedReadThreads.Count);
+        // Snapshot before asserting to avoid races with any background mutations.
+        var threads = api.MarkedReadThreads.ToList();
+        Assert.Single(threads);
     }
 }

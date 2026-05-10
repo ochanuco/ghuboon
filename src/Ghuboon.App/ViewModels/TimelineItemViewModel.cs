@@ -52,6 +52,11 @@ public partial class TimelineItemViewModel : ViewModelBase
 {
     private readonly TimelineItemContext _ctx;
 
+    // Issue #26: in-flight guard for the mark-as-read flow. Set immediately
+    // after the unread check using Interlocked so a concurrent click cannot
+    // slip past while the first call is still awaiting the API.
+    private int _markAsReadInFlight;
+
     [ObservableProperty]
     private bool _unread;
 
@@ -130,7 +135,12 @@ public partial class TimelineItemViewModel : ViewModelBase
     /// <summary>Back-compat alias used by older bindings.</summary>
     public string UpdatedRelative => RelativeTime;
 
-    [RelayCommand]
+    // Issue #26: serialize concurrent MarkAsRead invocations. Without the
+    // in-flight flag below, a second click slips past the `if (!Unread)` guard
+    // while the first call is still awaiting the API call, hitting GitHub twice
+    // for the same thread. AllowConcurrentExecutions=false also stops command
+    // re-entrancy at the binding level for keyboard / button mashing.
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task MarkAsReadAsync(CancellationToken ct)
     {
         if (!Unread)
@@ -138,55 +148,70 @@ public partial class TimelineItemViewModel : ViewModelBase
             return; // Idempotent.
         }
 
-        var pat = _ctx.PatProvider is null ? null : await _ctx.PatProvider(ct).ConfigureAwait(false);
-
-        try
+        // Try-acquire the in-flight slot. If another invocation already owns
+        // it we treat this as a no-op; the in-flight call will flip Unread,
+        // and any further calls will short-circuit on the !Unread guard above.
+        if (Interlocked.CompareExchange(ref _markAsReadInFlight, 1, 0) != 0)
         {
-            if (_ctx.Api is not null && !string.IsNullOrEmpty(pat) && !string.IsNullOrEmpty(ThreadId))
-            {
-                await _ctx.Api.MarkThreadReadAsync(pat, ThreadId, ct).ConfigureAwait(false);
-            }
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            // Phase 10 acceptance: failed read sync must not crash the app and
-            // the next sync reconciles. We surface the failure quietly.
-            _ctx.Log?.Warning(ex, "Mark-as-read API call failed for {ThreadId}", ThreadId);
-            FlashMessage = "Read sync failed; will retry on next sync.";
             return;
         }
 
-        var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
-
-        if (_ctx.Repository is not null && !string.IsNullOrEmpty(Id) && !string.IsNullOrEmpty(AccountId))
+        try
         {
+            var pat = _ctx.PatProvider is null ? null : await _ctx.PatProvider(ct).ConfigureAwait(false);
+
             try
             {
-                var updated = new GitHubNotification(
-                    Id,
-                    AccountId,
-                    ThreadId,
-                    RepositoryFullName,
-                    new NotificationSubject(SubjectType, Title, null, WebUrl),
-                    Reason,
-                    Unread: false,
-                    UpdatedAt,
-                    LastReadAt: now);
-                await _ctx.Repository.UpsertAsync(updated, string.Empty, now, ct).ConfigureAwait(false);
+                if (_ctx.Api is not null && !string.IsNullOrEmpty(pat) && !string.IsNullOrEmpty(ThreadId))
+                {
+                    await _ctx.Api.MarkThreadReadAsync(pat, ThreadId, ct).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
-                _ctx.Log?.Warning(ex, "Persisting local read state failed for {Id}", Id);
+                // Phase 10 acceptance: failed read sync must not crash the app and
+                // the next sync reconciles. We surface the failure quietly.
+                _ctx.Log?.Warning(ex, "Mark-as-read API call failed for {ThreadId}", ThreadId);
+                FlashMessage = "Read sync failed; will retry on next sync.";
+                return;
             }
-        }
 
-        Unread = false;
-        FlashMessage = null;
-        _ctx.OnMarkRead?.Invoke(this);
+            var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
+
+            if (_ctx.Repository is not null && !string.IsNullOrEmpty(Id) && !string.IsNullOrEmpty(AccountId))
+            {
+                try
+                {
+                    var updated = new GitHubNotification(
+                        Id,
+                        AccountId,
+                        ThreadId,
+                        RepositoryFullName,
+                        new NotificationSubject(SubjectType, Title, null, WebUrl),
+                        Reason,
+                        Unread: false,
+                        UpdatedAt,
+                        LastReadAt: now);
+                    await _ctx.Repository.UpsertAsync(updated, string.Empty, now, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    _ctx.Log?.Warning(ex, "Persisting local read state failed for {Id}", Id);
+                }
+            }
+
+            Unread = false;
+            FlashMessage = null;
+            _ctx.OnMarkRead?.Invoke(this);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _markAsReadInFlight, 0);
+        }
     }
 
     [RelayCommand]
