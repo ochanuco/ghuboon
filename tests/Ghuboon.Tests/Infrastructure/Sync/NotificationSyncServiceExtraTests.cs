@@ -32,11 +32,12 @@ public class NotificationSyncServiceExtraTests
         public InMemoryAccountRepository Accounts { get; } = new();
         public InMemoryRepositoryRepository Repositories { get; } = new();
         public InMemoryNotificationRepository Notifications { get; } = new();
+        public InMemoryNotificationEventRepository Events { get; } = new();
         public InMemorySyncStateRepository SyncStates { get; } = new();
         public FakeGitHubApiClient Api { get; } = new();
 
         public NotificationSyncService BuildService() =>
-            new(Credentials, Accounts, Repositories, Notifications, SyncStates, Api, Clock,
+            new(Credentials, Accounts, Repositories, Notifications, Events, SyncStates, Api, Clock,
                 logger: null, defaultAccountId: AccountId, period: null);
 
         public async Task SeedAsync()

@@ -46,11 +46,12 @@ public class NotificationSyncServiceTests
         public InMemoryAccountRepository Accounts { get; } = new();
         public InMemoryRepositoryRepository Repositories { get; } = new();
         public InMemoryNotificationRepository Notifications { get; } = new();
+        public InMemoryNotificationEventRepository Events { get; } = new();
         public InMemorySyncStateRepository SyncStates { get; } = new();
         public FakeGitHubApiClient Api { get; } = new();
 
         public NotificationSyncService BuildService(TimeSpan? period = null) =>
-            new(Credentials, Accounts, Repositories, Notifications, SyncStates, Api, Clock,
+            new(Credentials, Accounts, Repositories, Notifications, Events, SyncStates, Api, Clock,
                 logger: null, defaultAccountId: AccountId, period: period);
 
         public async Task SeedAccountAndPatAsync(bool seedPat = true)
@@ -445,6 +446,92 @@ public class NotificationSyncServiceTests
 
         service.Stop();
         Assert.False(service.IsRunning);
+    }
+
+    [Fact]
+    public async Task SyncAsync_AppendsOneEventPerUpsert()
+    {
+        // Each notification observed during a sync should produce exactly one
+        // event row alongside the latest-state upsert. Re-running the same
+        // sync against the same upstream timestamp must dedup (no second row).
+        var h = new Harness();
+        await h.SeedAccountAndPatAsync();
+
+        var notifs = new[]
+        {
+            BuildNotification("1", NotificationReason.Review),
+            BuildNotification("2", NotificationReason.Mention),
+            BuildNotification("3", NotificationReason.Comment),
+        };
+        h.Api.EnqueueList(new NotificationsResponse(notifs, "\"e1\"", RateLimitInfo.Empty, NotModified: false));
+
+        var service = h.BuildService();
+        await service.SyncAsync(AccountId);
+
+        Assert.Equal(3, h.Events.Count);
+        var listed = await h.Events.ListByAccountAsync(AccountId, 100);
+        Assert.Equal(3, listed.Count);
+        Assert.All(listed, e => Assert.Equal(AccountId, e.AccountId));
+    }
+
+    [Fact]
+    public async Task SyncAsync_SameSourceUpdatedAt_DedupsEventRow()
+    {
+        // Two syncs at the same upstream updated_at must collapse to one
+        // event row (the unique index does the work in the storage layer; the
+        // sync should not work around it). The notifications upsert still
+        // happens — only the event-log row is dedup'd.
+        var h = new Harness();
+        await h.SeedAccountAndPatAsync();
+
+        var fixedAt = new DateTimeOffset(2026, 5, 9, 11, 0, 0, TimeSpan.Zero);
+        var notif = BuildNotification("1", NotificationReason.Mention, updatedAt: fixedAt);
+
+        h.Api.EnqueueList(new NotificationsResponse(new[] { notif }, "\"e1\"", RateLimitInfo.Empty, NotModified: false));
+        h.Api.EnqueueList(new NotificationsResponse(new[] { notif }, "\"e1\"", RateLimitInfo.Empty, NotModified: false));
+
+        var service = h.BuildService();
+        await service.SyncAsync(AccountId);
+        // Advance the clock between syncs so observed_at would differ if it
+        // was the dedup key — the unique index uses source_updated_at instead.
+        h.Clock.Advance(TimeSpan.FromMinutes(5));
+        await service.SyncAsync(AccountId);
+
+        Assert.Equal(1, h.Events.Count);
+        Assert.True(h.Events.AppendCallCount >= 2,
+            $"expected two append attempts, observed {h.Events.AppendCallCount}");
+        Assert.True(h.Events.DedupedCount >= 1,
+            $"expected at least one dedup, observed {h.Events.DedupedCount}");
+    }
+
+    [Fact]
+    public async Task SyncAsync_MultipleUpdatesProduceMultipleEventRows()
+    {
+        // Open -> Draft -> Open over multiple sync windows must produce one
+        // event row per transition. The thread id is constant; only
+        // source_updated_at advances, so the event log's unique index lets
+        // every observation through.
+        var h = new Harness();
+        await h.SeedAccountAndPatAsync();
+
+        var t0 = new DateTimeOffset(2026, 5, 9, 11, 0, 0, TimeSpan.Zero);
+        var first = BuildNotification("1", NotificationReason.Review, updatedAt: t0);
+        var second = BuildNotification("1", NotificationReason.Review, updatedAt: t0.AddMinutes(10));
+        var third = BuildNotification("1", NotificationReason.Review, updatedAt: t0.AddMinutes(20));
+
+        h.Api.EnqueueList(new NotificationsResponse(new[] { first }, "\"e1\"", RateLimitInfo.Empty, NotModified: false));
+        h.Api.EnqueueList(new NotificationsResponse(new[] { second }, "\"e2\"", RateLimitInfo.Empty, NotModified: false));
+        h.Api.EnqueueList(new NotificationsResponse(new[] { third }, "\"e3\"", RateLimitInfo.Empty, NotModified: false));
+
+        var service = h.BuildService();
+        await service.SyncAsync(AccountId);
+        await service.SyncAsync(AccountId);
+        await service.SyncAsync(AccountId);
+
+        Assert.Equal(3, h.Events.Count);
+        var listed = await h.Events.ListByAccountAsync(AccountId, 100);
+        Assert.Equal(3, listed.Count);
+        Assert.All(listed, e => Assert.Equal($"{AccountId}:1", e.NotificationId));
     }
 
     [Fact]
