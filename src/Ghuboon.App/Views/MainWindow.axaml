@@ -9,7 +9,7 @@
         x:DataType="vm:MainWindowViewModel"
         Icon="/Assets/avalonia-logo.ico"
         Title="Ghuboon"
-        Width="900" Height="600">
+        Width="980" Height="900">
 
     <Design.DataContext>
         <vm:MainWindowViewModel/>
@@ -17,12 +17,11 @@
 
     <Grid>
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />   <!-- 0 top bar -->
-            <RowDefinition Height="*" />      <!-- 1 timeline -->
-            <RowDefinition Height="Auto" />   <!-- 2 tabs -->
-            <RowDefinition Height="Auto" />   <!-- 3 splitter -->
-            <RowDefinition Height="160" MinHeight="60" /> <!-- 4 detail (resizable) -->
-            <RowDefinition Height="Auto" />   <!-- 5 status -->
+            <RowDefinition Height="Auto" />                  <!-- 0 top bar -->
+            <RowDefinition Height="2*" MinHeight="120" />     <!-- 1 timeline -->
+            <RowDefinition Height="Auto" />                  <!-- 2 splitter -->
+            <RowDefinition Height="3*" MinHeight="240" />     <!-- 3 tabs+detail block -->
+            <RowDefinition Height="Auto" />                  <!-- 4 status -->
         </Grid.RowDefinitions>
 
         <!-- Top bar -->
@@ -77,42 +76,49 @@
                             Content="{Binding Timeline}" />
         </Panel>
 
-        <!-- Tabs (sit just below the timeline, Tween-style) -->
-        <ListBox Grid.Row="2"
-                 ItemsSource="{Binding Tabs}"
-                 SelectedItem="{Binding SelectedTab}"
-                 Padding="8,4"
-                 BorderThickness="0,1,0,0"
-                 BorderBrush="#22000000"
-                 Background="Transparent"
-                 IsVisible="{Binding !IsSettingsVisible}">
-            <ListBox.ItemsPanel>
-                <ItemsPanelTemplate>
-                    <StackPanel Orientation="Horizontal" Spacing="4" />
-                </ItemsPanelTemplate>
-            </ListBox.ItemsPanel>
-            <ListBox.ItemTemplate>
-                <DataTemplate>
-                    <TextBlock Text="{Binding}" Padding="10,4" />
-                </DataTemplate>
-            </ListBox.ItemTemplate>
-        </ListBox>
-
-        <!-- Splitter to resize the detail pane -->
-        <GridSplitter Grid.Row="3"
+        <!-- Splitter between timeline and the tabs+detail block. Dragging
+             this resizes the timeline / detail split; the tab bar inside the
+             bottom block stays Auto-height so it doesn't get squished. -->
+        <GridSplitter Grid.Row="2"
                       Height="4"
                       HorizontalAlignment="Stretch"
                       ResizeDirection="Rows"
                       Background="#11000000"
                       IsVisible="{Binding !IsSettingsVisible}" />
 
-        <!-- Detail panel: title + body, action buttons bottom-right -->
-        <Border Grid.Row="4"
-                Padding="10,8"
-                BorderThickness="0,1,0,0"
-                BorderBrush="#22000000"
-                Background="#04000000"
-                IsVisible="{Binding !IsSettingsVisible}">
+        <!-- Tabs + detail. Tabs Auto on top; detail fills the remaining
+             star-sized space inside this row. -->
+        <Grid Grid.Row="3"
+              IsVisible="{Binding !IsSettingsVisible}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />   <!-- tabs -->
+                <RowDefinition Height="*" />       <!-- detail -->
+            </Grid.RowDefinitions>
+
+            <ListBox Grid.Row="0"
+                     ItemsSource="{Binding Tabs}"
+                     SelectedItem="{Binding SelectedTab}"
+                     Padding="8,4"
+                     BorderThickness="0,1,0,0"
+                     BorderBrush="#22000000"
+                     Background="Transparent">
+                <ListBox.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal" Spacing="4" />
+                    </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding}" Padding="10,4" />
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+
+            <Border Grid.Row="1"
+                    Padding="10,8"
+                    BorderThickness="0,1,0,0"
+                    BorderBrush="#22000000"
+                    Background="#04000000">
             <Grid DataContext="{Binding Timeline.SelectedItem}"
                   RowDefinitions="Auto,*,Auto">
                 <!-- Header: reason badge / repo / relative time -->
@@ -183,10 +189,11 @@
                             Padding="8,2" />
                 </StackPanel>
             </Grid>
-        </Border>
+            </Border>
+        </Grid>
 
         <!-- Status bar (Phase 14) -->
-        <Border Grid.Row="5"
+        <Border Grid.Row="4"
                 Padding="10,4"
                 BorderThickness="0,1,0,0"
                 BorderBrush="#22000000"
@@ -247,7 +254,7 @@
         </Border>
 
         <!-- Settings full-window overlay -->
-        <ContentControl Grid.Row="1" Grid.RowSpan="5"
+        <ContentControl Grid.Row="1" Grid.RowSpan="3"
                         IsVisible="{Binding IsSettingsVisible}"
                         Content="{Binding Settings}" />
     </Grid>
