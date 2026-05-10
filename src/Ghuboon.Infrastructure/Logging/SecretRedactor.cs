@@ -10,7 +10,12 @@ public static partial class SecretRedactor
 {
     public const string Replacement = "[REDACTED]";
 
-    [GeneratedRegex(@"(?i)(Authorization\s*:\s*)\S+", RegexOptions.CultureInvariant)]
+    // Capture the entire header value up to end-of-line (multi-line mode so each
+    // Authorization header in a multi-line blob is matched independently). This
+    // intentionally swallows scheme + token + any trailing whitespace before the
+    // newline so the full credential is replaced, not just the first whitespace-
+    // delimited token.
+    [GeneratedRegex(@"(?im)(Authorization\s*:\s*).+$", RegexOptions.CultureInvariant)]
     private static partial Regex AuthorizationHeaderRegex();
 
     // Classic GitHub tokens: ghp_, gho_, ghu_, ghs_, ghr_ (PAT, OAuth, user, server, refresh).
