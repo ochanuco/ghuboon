@@ -336,6 +336,74 @@ public class NotificationSyncServiceTests
         Assert.Equal(SyncStage.Completed, stages[^1]);
     }
 
+    [Theory]
+    [InlineData("octo")]
+    [InlineData("/octo")]
+    [InlineData("octo/")]
+    [InlineData("/")]
+    [InlineData("octo/hello/extra")]
+    [InlineData("")]
+    public void SplitFullName_throws_for_malformed_inputs(string fullName)
+    {
+        // Issue #16: SplitFullName must reject anything that is not exactly
+        // "owner/name" so we never silently construct a RepositoryRef with
+        // duplicated or partial values.
+        var ex = Assert.Throws<ArgumentException>(() =>
+            NotificationSyncService.SplitFullName(fullName));
+        Assert.Contains(fullName, ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SplitFullName_throws_for_null_input()
+    {
+        Assert.Throws<ArgumentNullException>(() =>
+            NotificationSyncService.SplitFullName(null!));
+    }
+
+    [Fact]
+    public void SplitFullName_returns_owner_and_name_for_valid_input()
+    {
+        var (owner, name) = NotificationSyncService.SplitFullName("octo/hello");
+        Assert.Equal("octo", owner);
+        Assert.Equal("hello", name);
+    }
+
+    [Fact]
+    public async Task SyncAsync_SkipsNotificationWithMalformedRepositoryFullName()
+    {
+        // Issue #16: a single notification carrying a malformed repository_full_name
+        // (e.g. drift before issue #6 invariants land) must not abort the entire sync.
+        // The notification itself is still upserted (notifications carry their own
+        // primary key), but the repository upsert is skipped + logged.
+        var h = new Harness();
+        await h.SeedAccountAndPatAsync();
+
+        var good = BuildNotification("good", repo: "octo/hello");
+        var bad = BuildNotification("bad", repo: "missing-slash");
+
+        h.Api.EnqueueList(new NotificationsResponse(
+            new[] { good, bad },
+            "\"e1\"",
+            RateLimitInfo.Empty,
+            NotModified: false));
+
+        var service = h.BuildService();
+        var result = await service.SyncAsync(AccountId);
+
+        // Sync overall succeeds — partial failures must not poison cached data.
+        Assert.True(result.Success);
+        Assert.Equal(2, result.FetchedCount);
+
+        // Both notifications are persisted in the cache.
+        Assert.Equal(2, h.Notifications.Count);
+
+        // Only the well-formed repository is upserted; the malformed one is skipped.
+        Assert.Equal(1, h.Repositories.UpsertCallCount);
+        var repos = await h.Repositories.ListByAccountAsync(AccountId);
+        Assert.Single(repos);
+        Assert.Equal("octo/hello", repos[0].FullName);
+    }
+
     [Fact]
     public async Task SyncAsync_RepositoryUpsertedOncePerUniqueRepo()
     {

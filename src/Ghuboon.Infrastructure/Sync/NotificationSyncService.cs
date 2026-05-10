@@ -277,7 +277,21 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 if (!string.IsNullOrEmpty(notification.RepositoryFullName) &&
                     seenRepoFullNames.Add(notification.RepositoryFullName))
                 {
-                    await UpsertRepositoryAsync(accountId, notification.RepositoryFullName, ct).ConfigureAwait(false);
+                    try
+                    {
+                        await UpsertRepositoryAsync(accountId, notification.RepositoryFullName, ct).ConfigureAwait(false);
+                    }
+                    catch (ArgumentException ex)
+                    {
+                        // Malformed repository_full_name from upstream — log and skip
+                        // rather than failing the whole sync, so cached data is preserved
+                        // (issue #16). This is defensive against drift before issue #6's
+                        // invariants land.
+                        _logger?.Warning(
+                            ex,
+                            "Skipping repository upsert for notification {NotificationId} due to malformed full_name",
+                            notification.Id);
+                    }
                 }
             }
         }
@@ -527,13 +541,29 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
         await _repositoryRepository.UpsertAsync(repoRef, ct).ConfigureAwait(false);
     }
 
-    private static (string Owner, string Name) SplitFullName(string fullName)
+    /// <summary>
+    /// Splits a GitHub repository "owner/name" string into its parts. Throws
+    /// <see cref="ArgumentException"/> for malformed inputs so callers can decide
+    /// to skip the offending notification rather than silently constructing a
+    /// <see cref="RepositoryRef"/> with ambiguous values (issue #16).
+    /// </summary>
+    internal static (string Owner, string Name) SplitFullName(string fullName)
     {
+        ArgumentNullException.ThrowIfNull(fullName);
+
         var slash = fullName.IndexOf('/');
-        if (slash <= 0 || slash >= fullName.Length - 1)
+        // Require exactly one '/', with both halves non-empty. A second '/'
+        // is also rejected because GitHub repository full names never contain
+        // sub-paths.
+        if (slash <= 0 ||
+            slash >= fullName.Length - 1 ||
+            fullName.IndexOf('/', slash + 1) >= 0)
         {
-            return (fullName, fullName);
+            throw new ArgumentException(
+                $"Repository full name must be 'owner/name' format. Received: '{fullName}'.",
+                nameof(fullName));
         }
+
         return (fullName[..slash], fullName[(slash + 1)..]);
     }
 
