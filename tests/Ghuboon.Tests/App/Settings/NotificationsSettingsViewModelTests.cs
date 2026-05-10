@@ -1,5 +1,10 @@
+using System;
+using System.Threading;
+using System.Threading.Tasks;
 using Ghuboon.App.Services;
 using Ghuboon.App.ViewModels.Settings;
+using Ghuboon.Core.Abstractions;
+using Ghuboon.Core.Domain;
 
 namespace Ghuboon.Tests.App.Settings;
 
@@ -60,5 +65,48 @@ public class NotificationsSettingsViewModelTests
         Assert.Equal(
             new[] { "Review requested", "Mention", "Team mention", "Assigned" },
             vm.HighPriorityReasons);
+    }
+
+    [Fact]
+    public async Task Toggle_PersistFailure_RevertsAndSurfacesError()
+    {
+        // Issue #18: persistence failures must surface in the UI and revert
+        // the toggle so the displayed state matches what's actually persisted.
+        var settings = new ThrowingAppSettingsService();
+        var vm = new NotificationsSettingsViewModel(settings);
+        Assert.True(vm.OsNotificationsEnabled);
+
+        vm.OsNotificationsEnabled = false;
+
+        // The persist task is observed via a synchronous continuation, but
+        // give the runtime a tick to flush the failure path.
+        for (var i = 0; i < 10 && !vm.HasPersistError; i++)
+        {
+            await Task.Yield();
+        }
+
+        Assert.True(vm.HasPersistError, "Expected a persist error message after a failed write.");
+        Assert.False(string.IsNullOrEmpty(vm.PersistErrorMessage));
+        // Toggle should be reverted to its prior value (true).
+        Assert.True(vm.OsNotificationsEnabled);
+    }
+
+    private sealed class ThrowingAppSettingsService : IAppSettingsService
+    {
+        public bool IsConfigured => false;
+
+        public Task<string?> GetPatReferenceAsync() => Task.FromResult<string?>(null);
+
+        public Task<Account?> GetPrimaryAccountAsync(CancellationToken ct = default)
+            => Task.FromResult<Account?>(null);
+
+        public Task UpsertPrimaryAccountAsync(Account account, CancellationToken ct = default)
+            => Task.CompletedTask;
+
+        public Task<bool> GetBoolAsync(string key, bool defaultValue, CancellationToken ct = default)
+            => Task.FromResult(defaultValue);
+
+        public Task SetBoolAsync(string key, bool value, CancellationToken ct = default)
+            => Task.FromException(new InvalidOperationException("simulated persist failure"));
     }
 }

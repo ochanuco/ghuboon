@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using Ghuboon.App.ViewModels;
 using Ghuboon.Core.Domain;
@@ -51,8 +52,10 @@ public class TimelineItemViewModelTests
         await vm.MarkAsReadCommand.ExecuteAsync(null);
 
         Assert.False(vm.Unread);
-        Assert.Single(api.MarkedReadThreads);
-        Assert.Equal("1", api.MarkedReadThreads[0]);
+        // Snapshot the bag so ordering / single-element assertions are stable.
+        var threads = api.MarkedReadThreads.ToList();
+        Assert.Single(threads);
+        Assert.Equal("1", threads[0]);
         Assert.Equal(1, repo.UpsertCallCount);
     }
 

@@ -37,16 +37,10 @@ public static class UnreadCounter
             return 0;
         }
 
-        return items.Count(i => i.Unread && TabMatches(i.Reason, tab));
+        // Reuse the canonical reason-to-tab mapping defined alongside the
+        // DB-backed timeline filter (Issue #22). Keeping a single implementation
+        // avoids drift between the timeline list and the menu-bar / status-bar
+        // unread badge.
+        return items.Count(i => i.Unread && DbBackedTimelineService.MatchesTab(i.Reason, tab));
     }
-
-    private static bool TabMatches(NotificationReason reason, TimelineTab tab) => tab switch
-    {
-        TimelineTab.All => true,
-        TimelineTab.Review => reason == NotificationReason.Review,
-        TimelineTab.Mention => reason is NotificationReason.Mention or NotificationReason.TeamMention,
-        TimelineTab.MyPrs => reason == NotificationReason.MyPr,
-        TimelineTab.Watching => reason == NotificationReason.Watching,
-        _ => true,
-    };
 }

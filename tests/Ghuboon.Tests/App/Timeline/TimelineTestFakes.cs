@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Ghuboon.App.Services;
@@ -103,7 +105,10 @@ internal sealed class FakeAccountRepository : IAccountRepository
 
 internal sealed class FakeApiClient : IGitHubApiClient
 {
-    public List<string> MarkedReadThreads { get; } = new();
+    // Issue #27: concurrent MarkThreadReadAsync invocations may race the list,
+    // so use a ConcurrentBag to record threadIds without locking. Tests that
+    // care about ordering should call .ToList() to take a snapshot.
+    public ConcurrentBag<string> MarkedReadThreads { get; } = new();
     public Func<string, Exception?>? MarkReadOverride { get; set; }
     /// <summary>
     /// Optional gate; when set, <see cref="MarkThreadReadAsync"/> awaits this task

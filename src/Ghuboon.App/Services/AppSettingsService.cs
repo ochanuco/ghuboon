@@ -25,6 +25,8 @@ public sealed class AppSettingsService : IAppSettingsService
         IAccountRepository accountRepository,
         IAppSettingsRepository settingsRepository)
     {
+        ArgumentNullException.ThrowIfNull(accountRepository);
+        ArgumentNullException.ThrowIfNull(settingsRepository);
         _accountRepository = accountRepository;
         _settingsRepository = settingsRepository;
     }
@@ -48,6 +50,12 @@ public sealed class AppSettingsService : IAppSettingsService
     public async Task UpsertPrimaryAccountAsync(Account account, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(account);
+        if (!string.Equals(account.Id, PrimaryAccountId, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"Account.Id must be '{PrimaryAccountId}' for the MVP single-account UI; got '{account.Id}'.",
+                nameof(account));
+        }
         await _accountRepository.UpsertAsync(account, ct).ConfigureAwait(false);
         _cachedAccount = account;
     }

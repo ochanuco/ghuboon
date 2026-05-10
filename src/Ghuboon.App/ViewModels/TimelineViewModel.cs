@@ -19,6 +19,7 @@ namespace Ghuboon.App.ViewModels;
 public partial class TimelineViewModel : ViewModelBase
 {
     private readonly ITimelineService _timelineService;
+    private readonly Func<TimelineItemContext> _itemContextFactory;
     private readonly object _filterLock = new();
     private TimelineFilter _filter = TimelineFilter.Default;
     private CancellationTokenSource? _loadCts;
@@ -38,20 +39,41 @@ public partial class TimelineViewModel : ViewModelBase
     }
 
     public TimelineViewModel(ITimelineService timelineService)
+        : this(timelineService, ResolveItemContextFactory(timelineService))
+    {
+    }
+
+    public TimelineViewModel(ITimelineService timelineService, Func<TimelineItemContext> itemContextFactory)
     {
         _timelineService = timelineService ?? throw new ArgumentNullException(nameof(timelineService));
+        _itemContextFactory = itemContextFactory ?? (() => TimelineItemContext.Empty);
         Items = new ObservableCollection<TimelineItemViewModel>();
         Items.CollectionChanged += OnItemsChanged;
 
         // Initial synchronous placeholder snapshot; the real impl returns empty,
         // the stub returns demo rows for the previewer / legacy tests.
-        foreach (var item in _timelineService.GetPlaceholderItems())
+        // Issue #8: services return domain notifications now, so we map here.
+        var ctx = _itemContextFactory();
+        foreach (var notification in _timelineService.GetPlaceholderItems())
         {
-            AttachItem(item);
-            Items.Add(item);
+            var vm = new TimelineItemViewModel(notification, ctx);
+            AttachItem(vm);
+            Items.Add(vm);
         }
 
         RecomputeAggregates();
+    }
+
+    private static Func<TimelineItemContext> ResolveItemContextFactory(ITimelineService service)
+    {
+        // The DB-backed service exposes a per-row context factory so the
+        // composition root can hand commands (Browser/Clipboard/Repository/etc.)
+        // to each row. Anything else degrades to TimelineItemContext.Empty.
+        if (service is DbBackedTimelineService db)
+        {
+            return db.ItemContextFactory;
+        }
+        return () => TimelineItemContext.Empty;
     }
 
     public ObservableCollection<TimelineItemViewModel> Items { get; }
@@ -110,14 +132,24 @@ public partial class TimelineViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// Synchronous load entry point preserved for back-compat with Phase 1 tests.
-    /// Internally fans out to an async reload that does not block the caller.
+    /// Async load entry point. Modern callers should await this directly;
+    /// it replaces the legacy synchronous <see cref="Load"/> method.
     /// </summary>
+    public Task LoadAsync(CancellationToken ct = default) => ReloadAsync(ct);
+
+    /// <summary>
+    /// Synchronous load entry point preserved for back-compat with Phase 1 tests.
+    /// Wrapped in <see cref="Task.Run(Func{Task})"/> to escape the calling
+    /// SynchronizationContext (e.g. Avalonia's UI sync context) so the inner
+    /// awaits cannot deadlock when posting their continuations back.
+    /// New code should call <see cref="LoadAsync"/> instead.
+    /// </summary>
+    [Obsolete("Use LoadAsync. Kept for Phase 1 callers only.")]
     public void Load()
     {
-        // Synchronous: legacy tests rely on items being present right after this
-        // returns, so we drain the async result inline.
-        ReloadAsync().GetAwaiter().GetResult();
+        // Run on the thread-pool to avoid any UI-thread sync-context capture
+        // that would deadlock on .GetAwaiter().GetResult().
+        Task.Run(() => ReloadAsync()).GetAwaiter().GetResult();
     }
 
     /// <summary>
@@ -139,15 +171,19 @@ public partial class TimelineViewModel : ViewModelBase
         try
         {
             var filter = Filter;
-            var items = await _timelineService.LoadAsync(filter, cts.Token).ConfigureAwait(false);
+            var notifications = await _timelineService.LoadAsync(filter, cts.Token).ConfigureAwait(false);
 
             // Replace the collection on the same thread the observable model lives on.
             // For unit tests we're already there; in Avalonia, callers should drive this
             // from the UI thread (Dispatcher.UIThread.Post).
             DetachAllItems();
             Items.Clear();
-            foreach (var item in items)
+            // Issue #8: services return domain notifications now; map to VMs here
+            // (Presentation-layer responsibility) using the per-row context.
+            var ctx = _itemContextFactory();
+            foreach (var notification in notifications)
             {
+                var item = new TimelineItemViewModel(notification, ctx);
                 AttachItem(item);
                 Items.Add(item);
             }

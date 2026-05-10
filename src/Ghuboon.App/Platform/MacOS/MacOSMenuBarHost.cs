@@ -82,40 +82,107 @@ public sealed class MacOSMenuBarHost : IMenuBarHost
 
         _context = context;
 
-        EnsureTargetClassRegistered();
+        try
+        {
+            EnsureTargetClassRegistered();
 
-        // [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength]
-        // statusItemWithLength: takes a CGFloat (double on x86_64/arm64 macOS),
-        // so it needs the dedicated double overload of objc_msgSend rather
-        // than the generic IntPtr-arg one.
-        var statusBarClass = AppKitInterop.GetClass("NSStatusBar");
-        var systemStatusBar = AppKitInterop.SendIntPtr(statusBarClass, AppKitInterop.SelRegisterName("systemStatusBar"));
-        _statusItem = StatusItemWithLength(systemStatusBar, NSVariableStatusItemLength);
+            // [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength]
+            // statusItemWithLength: takes a CGFloat (double on x86_64/arm64 macOS),
+            // so it needs the dedicated double overload of objc_msgSend rather
+            // than the generic IntPtr-arg one.
+            var statusBarClass = AppKitInterop.GetClass("NSStatusBar");
+            var systemStatusBar = AppKitInterop.SendIntPtr(statusBarClass, AppKitInterop.SelRegisterName("systemStatusBar"));
+            _statusItem = StatusItemWithLength(systemStatusBar, NSVariableStatusItemLength);
 
-        // [statusItem setTitle:@"Ghuboon"]
-        var nsStringClass = AppKitInterop.GetClass("NSString");
-        var titleString = AppKitInterop.SendIntPtr_String(
-            nsStringClass,
-            AppKitInterop.SelRegisterName("stringWithUTF8String:"),
-            "Ghuboon");
-        AppKitInterop.SendVoid_IntPtr(_statusItem, AppKitInterop.SelRegisterName("setTitle:"), titleString);
+            // [statusItem setTitle:@"Ghuboon"]
+            var nsStringClass = AppKitInterop.GetClass("NSString");
+            var titleString = AppKitInterop.SendIntPtr_String(
+                nsStringClass,
+                AppKitInterop.SelRegisterName("stringWithUTF8String:"),
+                "Ghuboon");
+            AppKitInterop.SendVoid_IntPtr(_statusItem, AppKitInterop.SelRegisterName("setTitle:"), titleString);
 
-        // Build the NSMenu.
-        var menu = AllocInit("NSMenu");
+            // Build the NSMenu.
+            var menu = AllocInit("NSMenu");
 
-        AddMenuItem(menu, "Show Ghuboon", s_selShow);
-        AddMenuItem(menu, "Sync now", s_selSync);
-        _unreadMenuItem = AddMenuItem(menu, FormatUnread(0), IntPtr.Zero); // disabled / informational
-        AddSeparator(menu);
-        AddMenuItem(menu, "Settings…", s_selSettings);
-        AddSeparator(menu);
-        AddMenuItem(menu, "Hide window", s_selHide);
-        AddMenuItem(menu, "Quit Ghuboon", s_selQuit);
+            // Issue #17: balance the +1 retain count from AllocInit. setMenu: copies
+            // the receiver, so once we hand it over we can release ours. We use
+            // [menu autorelease] (rather than release immediately) to keep things
+            // safe even if AppKit defers the copy under the hood.
+            AddMenuItem(menu, "Show Ghuboon", s_selShow);
+            AddMenuItem(menu, "Sync now", s_selSync);
+            _unreadMenuItem = AddMenuItem(menu, FormatUnread(0), IntPtr.Zero); // disabled / informational
+            AddSeparator(menu);
+            AddMenuItem(menu, "Settings…", s_selSettings);
+            AddSeparator(menu);
+            AddMenuItem(menu, "Hide window", s_selHide);
+            AddMenuItem(menu, "Quit Ghuboon", s_selQuit);
 
-        AppKitInterop.SendVoid_IntPtr(_statusItem, AppKitInterop.SelRegisterName("setMenu:"), menu);
+            AppKitInterop.SendVoid_IntPtr(_statusItem, AppKitInterop.SelRegisterName("setMenu:"), menu);
+            // Balance ownership: AllocInit returned +1, NSStatusItem now retains
+            // the menu via setMenu:, so we autorelease our reference.
+            AppKitInterop.SendVoid(menu, AppKitInterop.SelRegisterName("autorelease"));
+        }
+        catch
+        {
+            // Issue #17 rollback discipline: undo any partial state we set so a
+            // future Initialize attempt (or test run) starts clean.
+            try
+            {
+                if (_statusItem != IntPtr.Zero)
+                {
+                    var statusBarClass = AppKitInterop.GetClass("NSStatusBar");
+                    var systemStatusBar = AppKitInterop.SendIntPtr(statusBarClass, AppKitInterop.SelRegisterName("systemStatusBar"));
+                    AppKitInterop.SendVoid_IntPtr(systemStatusBar, AppKitInterop.SelRegisterName("removeStatusItem:"), _statusItem);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup; do not mask the original failure.
+            }
+            _statusItem = IntPtr.Zero;
+            _unreadMenuItem = IntPtr.Zero;
+            _context = null;
+            // Reset the active-instance sentinel so a retry can succeed.
+            Interlocked.CompareExchange(ref s_active, null, this);
+            throw;
+        }
     }
 
     public void UpdateUnreadCount(int count)
+    {
+        if (_disposed || _unreadMenuItem == IntPtr.Zero)
+        {
+            return;
+        }
+
+        // Issue #17: AppKit objects are main-thread-only. If we're called from a
+        // background thread (e.g., a sync continuation), marshal the call to the
+        // main dispatch queue. We pin a small managed payload via GCHandle so
+        // dispatch_async_f can invoke a static trampoline that reads it back.
+        if (IsMainThread())
+        {
+            ApplyUnreadCountOnMainThread(count);
+            return;
+        }
+
+        var payload = new UnreadCountUpdate(this, count);
+        var handle = GCHandle.Alloc(payload);
+        try
+        {
+            AppKitInterop.DispatchAsyncF(
+                AppKitInterop.DispatchGetMainQueue(),
+                GCHandle.ToIntPtr(handle),
+                s_dispatchUnreadTrampolinePtr);
+        }
+        catch
+        {
+            handle.Free();
+            throw;
+        }
+    }
+
+    private void ApplyUnreadCountOnMainThread(int count)
     {
         if (_disposed || _unreadMenuItem == IntPtr.Zero)
         {
@@ -128,6 +195,52 @@ public sealed class MacOSMenuBarHost : IMenuBarHost
             AppKitInterop.SelRegisterName("stringWithUTF8String:"),
             FormatUnread(count));
         AppKitInterop.SendVoid_IntPtr(_unreadMenuItem, AppKitInterop.SelRegisterName("setTitle:"), newTitle);
+    }
+
+    private static bool IsMainThread()
+    {
+        try
+        {
+            var nsThread = AppKitInterop.GetClass("NSThread");
+            return AppKitInterop.SendBool(nsThread, AppKitInterop.SelRegisterName("isMainThread"));
+        }
+        catch
+        {
+            // If we can't even talk to NSThread, assume we're not on main and
+            // hop to the main queue defensively. The dispatch will be a no-op
+            // on a non-AppKit host.
+            return false;
+        }
+    }
+
+    private sealed record UnreadCountUpdate(MacOSMenuBarHost Host, int Count);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void DispatchTrampoline(IntPtr context);
+
+    private static readonly DispatchTrampoline s_dispatchUnreadTrampoline = DispatchUnreadCount;
+    private static readonly IntPtr s_dispatchUnreadTrampolinePtr =
+        Marshal.GetFunctionPointerForDelegate(s_dispatchUnreadTrampoline);
+
+    private static void DispatchUnreadCount(IntPtr context)
+    {
+        if (context == IntPtr.Zero)
+        {
+            return;
+        }
+        var handle = GCHandle.FromIntPtr(context);
+        try
+        {
+            if (handle.Target is UnreadCountUpdate u)
+            {
+                try { u.Host.ApplyUnreadCountOnMainThread(u.Count); }
+                catch { /* swallow into native frame */ }
+            }
+        }
+        finally
+        {
+            handle.Free();
+        }
     }
 
     public void Dispose()
@@ -199,6 +312,9 @@ public sealed class MacOSMenuBarHost : IMenuBarHost
         }
 
         AppKitInterop.SendVoid_IntPtr(menu, AppKitInterop.SelRegisterName("addItem:"), item);
+        // Issue #17: addItem: retains the item. Balance the +1 from alloc/init
+        // by autoreleasing our reference; the menu owns the item now.
+        AppKitInterop.SendVoid(item, AppKitInterop.SelRegisterName("autorelease"));
         return item;
     }
 
@@ -209,41 +325,84 @@ public sealed class MacOSMenuBarHost : IMenuBarHost
         AppKitInterop.SendVoid_IntPtr(menu, AppKitInterop.SelRegisterName("addItem:"), separator);
     }
 
+    private static readonly object s_classRegistrationLock = new();
+
     private static void EnsureTargetClassRegistered()
     {
-        if (Interlocked.CompareExchange(ref s_classRegistered, 1, 0) != 0)
+        // Issue #17: only set s_classRegistered = 1 *after* the registration
+        // and method-add steps succeed, so a partial failure doesn't leave the
+        // process in a state where a retry skips re-registration but the class
+        // is unusable. We use a coarse lock here because class registration is
+        // a one-time process-lifetime event.
+        if (Volatile.Read(ref s_classRegistered) == 1)
         {
             return;
         }
 
-        var nsObject = AppKitInterop.GetClass("NSObject");
-        s_targetClass = AppKitInterop.AllocateClassPair(nsObject, "GhuboonMenuTarget", IntPtr.Zero);
+        lock (s_classRegistrationLock)
+        {
+            if (s_classRegistered == 1)
+            {
+                return;
+            }
 
-        s_selShow = AppKitInterop.SelRegisterName("ghuboonShow:");
-        s_selHide = AppKitInterop.SelRegisterName("ghuboonHide:");
-        s_selSync = AppKitInterop.SelRegisterName("ghuboonSync:");
-        s_selSettings = AppKitInterop.SelRegisterName("ghuboonSettings:");
-        s_selQuit = AppKitInterop.SelRegisterName("ghuboonQuit:");
+            var nsObject = AppKitInterop.GetClass("NSObject");
+            var cls = AppKitInterop.AllocateClassPair(nsObject, "GhuboonMenuTarget", IntPtr.Zero);
 
-        // Type encoding for "void method(id self, SEL _cmd, id sender)":
-        //   v   -> void return
-        //   @   -> id self (16 bytes after the implicit args; the runtime
-        //          accepts the simplified "v@:@" form for unary-arg actions)
-        //   :   -> SEL _cmd
-        //   @   -> id sender
-        const string actionTypes = "v@:@";
+            try
+            {
+                var selShow = AppKitInterop.SelRegisterName("ghuboonShow:");
+                var selHide = AppKitInterop.SelRegisterName("ghuboonHide:");
+                var selSync = AppKitInterop.SelRegisterName("ghuboonSync:");
+                var selSettings = AppKitInterop.SelRegisterName("ghuboonSettings:");
+                var selQuit = AppKitInterop.SelRegisterName("ghuboonQuit:");
 
-        AppKitInterop.ClassAddMethod(s_targetClass, s_selShow, GetCallback(MenuAction.Show), actionTypes);
-        AppKitInterop.ClassAddMethod(s_targetClass, s_selHide, GetCallback(MenuAction.Hide), actionTypes);
-        AppKitInterop.ClassAddMethod(s_targetClass, s_selSync, GetCallback(MenuAction.Sync), actionTypes);
-        AppKitInterop.ClassAddMethod(s_targetClass, s_selSettings, GetCallback(MenuAction.Settings), actionTypes);
-        AppKitInterop.ClassAddMethod(s_targetClass, s_selQuit, GetCallback(MenuAction.Quit), actionTypes);
+                // Type encoding for "void method(id self, SEL _cmd, id sender)":
+                //   v   -> void return
+                //   @   -> id self (16 bytes after the implicit args; the runtime
+                //          accepts the simplified "v@:@" form for unary-arg actions)
+                //   :   -> SEL _cmd
+                //   @   -> id sender
+                const string actionTypes = "v@:@";
 
-        AppKitInterop.RegisterClassPair(s_targetClass);
+                AppKitInterop.ClassAddMethod(cls, selShow, GetCallback(MenuAction.Show), actionTypes);
+                AppKitInterop.ClassAddMethod(cls, selHide, GetCallback(MenuAction.Hide), actionTypes);
+                AppKitInterop.ClassAddMethod(cls, selSync, GetCallback(MenuAction.Sync), actionTypes);
+                AppKitInterop.ClassAddMethod(cls, selSettings, GetCallback(MenuAction.Settings), actionTypes);
+                AppKitInterop.ClassAddMethod(cls, selQuit, GetCallback(MenuAction.Quit), actionTypes);
 
-        // Allocate one shared target instance.
-        var allocated = AppKitInterop.SendIntPtr(s_targetClass, AppKitInterop.SelRegisterName("alloc"));
-        s_targetInstance = AppKitInterop.SendIntPtr(allocated, AppKitInterop.SelRegisterName("init"));
+                AppKitInterop.RegisterClassPair(cls);
+
+                // Allocate one shared target instance.
+                var allocated = AppKitInterop.SendIntPtr(cls, AppKitInterop.SelRegisterName("alloc"));
+                var instance = AppKitInterop.SendIntPtr(allocated, AppKitInterop.SelRegisterName("init"));
+
+                // Publish the registered state only on full success.
+                s_targetClass = cls;
+                s_selShow = selShow;
+                s_selHide = selHide;
+                s_selSync = selSync;
+                s_selSettings = selSettings;
+                s_selQuit = selQuit;
+                s_targetInstance = instance;
+                Interlocked.Exchange(ref s_classRegistered, 1);
+            }
+            catch
+            {
+                // Best-effort: dispose the half-built class pair if registration
+                // hasn't yet committed it to the runtime, so a retry can rebuild.
+                try
+                {
+                    AppKitInterop.DisposeClassPair(cls);
+                }
+                catch
+                {
+                    // Ignore: the class may have already been registered, in
+                    // which case dispose is a no-op (or invalid).
+                }
+                throw;
+            }
+        }
     }
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]

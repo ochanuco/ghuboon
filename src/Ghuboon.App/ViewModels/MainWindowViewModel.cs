@@ -161,7 +161,15 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
 
             if (!string.IsNullOrEmpty(accountId))
             {
-                _ = TriggerSyncAsync(accountId!);
+                // Fire-and-forget on purpose (we don't want InitialLoadAsync to
+                // block on the network), but observe faults so they don't get
+                // swallowed by the unawaited Task.
+                _ = TriggerSyncAsync(accountId!).ContinueWith(
+                    t => System.Diagnostics.Debug.WriteLine(
+                        $"InitialLoad: background sync faulted: {t.Exception?.GetBaseException().Message}"),
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted,
+                    TaskScheduler.Default);
             }
             else
             {
@@ -294,8 +302,15 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
                 {
                     RateLimitText = FormatRateLimit(rl);
                 }
-                // Reload the timeline to reflect newly persisted rows.
-                _ = Timeline.ReloadAsync();
+                // Reload the timeline to reflect newly persisted rows. We can't
+                // await here (this is invoked from a sync handler), but log
+                // any faults so they don't disappear silently.
+                _ = Timeline.ReloadAsync().ContinueWith(
+                    t => System.Diagnostics.Debug.WriteLine(
+                        $"OnSyncProgress.Completed: timeline reload faulted: {t.Exception?.GetBaseException().Message}"),
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted,
+                    TaskScheduler.Default);
                 break;
             case SyncStage.Failed:
                 IsSyncing = false;
@@ -357,7 +372,7 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
     /// </summary>
     public static string FormatRateLimit(RateLimitInfo info)
     {
-        if (info is null) return string.Empty;
+        ArgumentNullException.ThrowIfNull(info);
 
         var rem = info.Remaining?.ToString() ?? "?";
         var resetPart = info.ResetAt is { } r

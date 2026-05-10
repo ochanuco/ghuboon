@@ -52,10 +52,12 @@ public partial class AboutSettingsViewModel : ViewModelBase
                 UseShellExecute = true,
             });
         }
-        catch
+        catch (Exception ex)
         {
-            // Browser-launch failures are non-fatal. Phase 14 surfaces UI status
-            // messages; for now we swallow rather than crash the Settings screen.
+            // Browser-launch failures are non-fatal. Log via Trace so diagnostics
+            // can surface the failure without crashing the Settings screen.
+            // Phase 14 will surface UI status messages.
+            Trace.WriteLine($"AboutSettingsViewModel.DefaultOpenBrowser: failed to open '{url}': {ex.GetType().Name}: {ex.Message}");
         }
     }
 

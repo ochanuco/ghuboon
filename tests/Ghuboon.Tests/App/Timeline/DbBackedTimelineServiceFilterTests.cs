@@ -62,7 +62,7 @@ public class DbBackedTimelineServiceFilterTests
         var result = await svc.LoadAsync(filter);
 
         Assert.Single(result);
-        Assert.Equal("Add CONTRIBUTING", result[0].Title);
+        Assert.Equal("Add CONTRIBUTING", result[0].Subject.Title);
     }
 
     [Theory]
@@ -111,7 +111,7 @@ public class DbBackedTimelineServiceFilterTests
         // Each variant must produce the same hits (the title "Mention me" and
         // the Mention reason value).
         Assert.NotEmpty(result);
-        Assert.Contains(result, r => r.Title == "Mention me");
+        Assert.Contains(result, r => r.Subject.Title == "Mention me");
     }
 
     [Fact]
