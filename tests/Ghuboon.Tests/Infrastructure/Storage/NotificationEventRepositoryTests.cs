@@ -119,23 +119,28 @@ public class NotificationEventRepositoryTests
     }
 
     [Fact]
-    public async Task ListByAccount_returns_only_matching_account_ordered_oldest_first()
+    public async Task ListByAccount_returns_only_matching_account_ordered_by_source_updated_at_ascending()
     {
-        // Tween-like timeline: newest sits at the bottom, so the repo
-        // returns rows oldest-first for direct binding to the UI ListBox.
+        // Tween-like timeline: rows come back oldest-first (newest at the
+        // bottom of the UI). Ordering is by source_updated_at — the GitHub
+        // thread updated_at — so the displayed order matches the "Updated"
+        // column rather than reflecting when our sync happened to run.
         await using var temp = new TempDatabase(seedNotifications: false);
         await SeedNotificationAsync(temp, "acct-1:1", "acct-1");
         await SeedNotificationAsync(temp, "acct-1:2", "acct-1");
         await SeedNotificationAsync(temp, "acct-2:1", "acct-2");
         var repo = new NotificationEventRepository(temp.Factory);
 
+        var observedNow = new DateTimeOffset(2026, 5, 10, 0, 0, 0, TimeSpan.Zero);
         var older = SampleEvent(notificationId: "acct-1:1") with
         {
-            ObservedAt = new DateTimeOffset(2026, 4, 1, 0, 0, 0, TimeSpan.Zero),
+            SourceUpdatedAt = new DateTimeOffset(2026, 4, 1, 0, 0, 0, TimeSpan.Zero),
+            ObservedAt = observedNow,
         };
         var newer = SampleEvent(notificationId: "acct-1:2") with
         {
-            ObservedAt = new DateTimeOffset(2026, 5, 1, 0, 0, 0, TimeSpan.Zero),
+            SourceUpdatedAt = new DateTimeOffset(2026, 5, 1, 0, 0, 0, TimeSpan.Zero),
+            ObservedAt = observedNow,
         };
         var otherAccount = SampleEvent(notificationId: "acct-2:1", accountId: "acct-2");
 

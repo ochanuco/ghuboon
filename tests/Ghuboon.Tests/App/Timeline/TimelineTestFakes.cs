@@ -97,8 +97,10 @@ internal sealed class FakeNotificationEventRepository : INotificationEventReposi
 
     public Task<IReadOnlyList<NotificationEvent>> ListByAccountAsync(string accountId, int limit, CancellationToken ct = default)
     {
-        // Tween-like timeline: take the latest N (DESC) but return them
-        // oldest-first so the UI's ListBox renders newest-at-the-bottom.
+        // Tween-like timeline: cap to the latest N events by observed_at
+        // (when WE saw them) but return them ordered by source_updated_at
+        // (when GitHub last touched the thread) so the displayed order
+        // matches the "Updated" column the UI surfaces.
         var newest = Events
             .Where(e => e.AccountId == accountId)
             .OrderByDescending(e => e.ObservedAt)
@@ -106,7 +108,7 @@ internal sealed class FakeNotificationEventRepository : INotificationEventReposi
             .Take(limit)
             .ToList();
         IReadOnlyList<NotificationEvent> list = newest
-            .OrderBy(e => e.ObservedAt)
+            .OrderBy(e => e.SourceUpdatedAt)
             .ThenBy(e => e.Id)
             .ToList();
         return Task.FromResult(list);

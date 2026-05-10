@@ -101,11 +101,13 @@ public sealed class NotificationEventRepository : INotificationEventRepository
         await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
 
         // Tween-like timeline: newest goes at the bottom, so the UI receives
-        // events oldest-first. We still cap to the latest N events in the
-        // inner query (DESC LIMIT), then re-order ASC for display. Ordering
-        // uses datetime(observed_at) so mixed-offset legacy rows still sort
-        // chronologically; id breaks ties for events observed at the exact
-        // same instant.
+        // events oldest-first. The inner query caps to the latest N rows by
+        // observed_at (when WE saw them) so a v4 backfill of historical
+        // notifications still surfaces. The outer ORDER uses
+        // source_updated_at — i.e. the GitHub thread's updated_at — so the
+        // displayed order matches the "Updated" column the user sees and
+        // chronologically reflects upstream activity rather than an
+        // arbitrary side-effect of when our sync ran.
         const string sql = """
                            SELECT id AS Id,
                                   account_id AS AccountId,
@@ -129,7 +131,7 @@ public sealed class NotificationEventRepository : INotificationEventRepository
                              ORDER BY datetime(observed_at) DESC, id DESC
                              LIMIT @limit
                            )
-                           ORDER BY datetime(observed_at) ASC, id ASC;
+                           ORDER BY datetime(source_updated_at) ASC, id ASC;
                            """;
 
         var rows = await connection.QueryAsync<NotificationEventRow>(new CommandDefinition(
