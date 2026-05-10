@@ -134,7 +134,7 @@ public class TimelineViewModelTests
                 subjectType));
         }
 
-        public Task<IReadOnlyList<TimelineItemViewModel>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
+        public Task<IReadOnlyList<GitHubNotification>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
         {
             IEnumerable<GitHubNotification> q = Notifications;
             q = q.Where(n => DbBackedTimelineService.MatchesTab(n.Reason, filter.Tab));
@@ -152,14 +152,12 @@ public class TimelineViewModelTests
                     || n.Reason.ToString().Contains(needle, StringComparison.OrdinalIgnoreCase)
                     || (n.Subject.Type ?? string.Empty).Contains(needle, StringComparison.OrdinalIgnoreCase));
             }
-            var ordered = q.OrderByDescending(n => n.UpdatedAt).ToList();
-            IReadOnlyList<TimelineItemViewModel> mapped = ordered.Select(n => new TimelineItemViewModel(n, TimelineItemContext.Empty)).ToList();
-            return Task.FromResult(mapped);
+            return Task.FromResult<IReadOnlyList<GitHubNotification>>(q.OrderByDescending(n => n.UpdatedAt).ToList());
         }
 
         public Task<IReadOnlyList<RepositoryRef>> ListRepositoriesAsync(CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<RepositoryRef>>(Array.Empty<RepositoryRef>());
 
-        public IReadOnlyList<TimelineItemViewModel> GetPlaceholderItems() => Array.Empty<TimelineItemViewModel>();
+        public IReadOnlyList<GitHubNotification> GetPlaceholderItems() => Array.Empty<GitHubNotification>();
     }
 }

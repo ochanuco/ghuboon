@@ -24,13 +24,28 @@ public class TimelineViewModelTests
     }
 
     [Fact]
-    public void Load_ReplacesItems()
+    public async Task Load_ReplacesItems()
     {
         var vm = new TimelineViewModel(new StubTimelineService());
 
-        vm.Load();
+        // Pre-populate with an identifiable dummy element. After LoadAsync the
+        // dummy must be gone (the items are *replaced*, not appended) and the
+        // new items must be present.
+        const string dummyMarker = "DUMMY-LOAD-REPLACES-MARKER";
+        var dummy = TimelineItemViewModel.Placeholder(
+            "dummy-id",
+            "octocat/dummy",
+            dummyMarker,
+            "mention",
+            DateTimeOffset.UtcNow,
+            unread: true);
+        vm.Items.Insert(0, dummy);
+        Assert.Contains(vm.Items, i => i.Title == dummyMarker);
+
+        await vm.LoadAsync();
 
         Assert.Equal(5, vm.Items.Count);
+        Assert.DoesNotContain(vm.Items, i => i.Title == dummyMarker);
     }
 
     [Fact]
@@ -54,16 +69,34 @@ public class TimelineViewModelTests
 
     private sealed class FakeTimelineService : ITimelineService
     {
-        public Task<IReadOnlyList<TimelineItemViewModel>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
-            => Task.FromResult<IReadOnlyList<TimelineItemViewModel>>(GetPlaceholderItems());
+        public Task<IReadOnlyList<GitHubNotification>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<GitHubNotification>>(GetPlaceholderItems());
 
         public Task<IReadOnlyList<RepositoryRef>> ListRepositoriesAsync(CancellationToken ct = default)
             => Task.FromResult<IReadOnlyList<RepositoryRef>>(Array.Empty<RepositoryRef>());
 
-        public IReadOnlyList<TimelineItemViewModel> GetPlaceholderItems() => new[]
+        public IReadOnlyList<GitHubNotification> GetPlaceholderItems() => new[]
         {
-            new TimelineItemViewModel("a", "repo/one", "title 1", "mention", DateTimeOffset.UtcNow, true),
-            new TimelineItemViewModel("b", "repo/two", "title 2", "subscribed", DateTimeOffset.UtcNow.AddHours(-1), false),
+            new GitHubNotification(
+                Id: "primary:a",
+                AccountId: "primary",
+                ThreadId: "a",
+                RepositoryFullName: "repo/one",
+                Subject: new NotificationSubject("PullRequest", "title 1", null, null),
+                Reason: NotificationReason.Mention,
+                Unread: true,
+                UpdatedAt: DateTimeOffset.UtcNow,
+                LastReadAt: null),
+            new GitHubNotification(
+                Id: "primary:b",
+                AccountId: "primary",
+                ThreadId: "b",
+                RepositoryFullName: "repo/two",
+                Subject: new NotificationSubject("PullRequest", "title 2", null, null),
+                Reason: NotificationReason.Watching,
+                Unread: false,
+                UpdatedAt: DateTimeOffset.UtcNow.AddHours(-1),
+                LastReadAt: null),
         };
     }
 }

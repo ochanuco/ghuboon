@@ -14,14 +14,27 @@ namespace Ghuboon.App.Services;
 /// Loads notifications for the configured primary account and applies the
 /// <see cref="TimelineFilter"/> in memory: tab filter (Phase 9), repo dropdown,
 /// and free-text search.
+///
+/// Issue #8: returns domain <see cref="GitHubNotification"/> rows. The
+/// presentation layer is responsible for mapping to view-models. The
+/// per-row <see cref="TimelineItemContext"/> factory is preserved for backwards
+/// compatibility but is no longer used internally; callers that previously
+/// passed a factory can drop it.
 /// </summary>
 public sealed class DbBackedTimelineService : ITimelineService
 {
     private readonly INotificationRepository _notifications;
     private readonly IRepositoryRepository _repositories;
     private readonly IAccountRepository _accounts;
-    private readonly Func<TimelineItemContext> _itemContextFactory;
     private readonly string _accountId;
+
+    /// <summary>
+    /// Optional factory for the per-row VM context. Retained so existing callers
+    /// (App composition root, tests) can continue to wire one through; the
+    /// <see cref="TimelineViewModel"/> reads it via <see cref="ItemContextFactory"/>
+    /// to attach commands to the rows it builds.
+    /// </summary>
+    public Func<TimelineItemContext> ItemContextFactory { get; }
 
     public DbBackedTimelineService(
         INotificationRepository notifications,
@@ -33,11 +46,11 @@ public sealed class DbBackedTimelineService : ITimelineService
         _notifications = notifications ?? throw new ArgumentNullException(nameof(notifications));
         _repositories = repositories ?? throw new ArgumentNullException(nameof(repositories));
         _accounts = accounts ?? throw new ArgumentNullException(nameof(accounts));
-        _itemContextFactory = itemContextFactory ?? (() => TimelineItemContext.Empty);
+        ItemContextFactory = itemContextFactory ?? (() => TimelineItemContext.Empty);
         _accountId = accountId;
     }
 
-    public async Task<IReadOnlyList<TimelineItemViewModel>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
+    public async Task<IReadOnlyList<GitHubNotification>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(filter);
 
@@ -67,10 +80,7 @@ public sealed class DbBackedTimelineService : ITimelineService
                 || Contains(n.Subject.Type, needle));
         }
 
-        var ordered = q.OrderByDescending(n => n.UpdatedAt).ToList();
-
-        var ctx = _itemContextFactory();
-        return ordered.Select(n => new TimelineItemViewModel(n, ctx)).ToList();
+        return q.OrderByDescending(n => n.UpdatedAt).ToList();
     }
 
     public async Task<IReadOnlyList<RepositoryRef>> ListRepositoriesAsync(CancellationToken ct = default)
@@ -79,8 +89,8 @@ public sealed class DbBackedTimelineService : ITimelineService
         return repos.OrderBy(r => r.FullName, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    public IReadOnlyList<TimelineItemViewModel> GetPlaceholderItems() =>
-        Array.Empty<TimelineItemViewModel>();
+    public IReadOnlyList<GitHubNotification> GetPlaceholderItems() =>
+        Array.Empty<GitHubNotification>();
 
     public static bool MatchesTab(NotificationReason reason, TimelineTab tab) => tab switch
     {

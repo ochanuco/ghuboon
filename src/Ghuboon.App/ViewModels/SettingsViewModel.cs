@@ -32,8 +32,14 @@ public partial class SettingsViewModel : ViewModelBase
     }
 
     public SettingsViewModel(IAppSettingsService appSettings)
-        : this(BuildDefault(appSettings))
+        : this(BuildDefault(NullCheck(appSettings)))
     {
+    }
+
+    private static IAppSettingsService NullCheck(IAppSettingsService appSettings)
+    {
+        ArgumentNullException.ThrowIfNull(appSettings);
+        return appSettings;
     }
 
     public SettingsViewModel(SettingsViewModelDependencies deps)

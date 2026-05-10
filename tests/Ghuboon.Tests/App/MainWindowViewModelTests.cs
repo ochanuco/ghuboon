@@ -1,6 +1,11 @@
+using System;
+using System.Collections.Generic;
 using System.ComponentModel;
+using System.Threading;
+using System.Threading.Tasks;
 using Ghuboon.App.Services;
 using Ghuboon.App.ViewModels;
+using Ghuboon.Core.Domain;
 
 namespace Ghuboon.Tests.App;
 
@@ -73,13 +78,45 @@ public class MainWindowViewModelTests
     }
 
     [Fact]
-    public void SyncCommand_ReloadsTimeline()
+    public async Task SyncCommand_ReloadsTimeline()
     {
-        var vm = new MainWindowViewModel(new StubAppSettingsService(), new StubTimelineService());
-        var initialCount = vm.Timeline.Items.Count;
+        // Issue #8: assert that SyncCommand actually drives a reload through the
+        // timeline service (was previously only checking Items.Count).
+        var spy = new SpyTimelineService();
+        var vm = new MainWindowViewModel(new StubAppSettingsService(), spy);
 
-        vm.SyncCommand.Execute(null);
+        Assert.Equal(1, spy.PlaceholderCalls); // ctor placeholder fast-path
+        Assert.Equal(0, spy.LoadCalls);
 
-        Assert.Equal(initialCount, vm.Timeline.Items.Count);
+        await vm.SyncCommand.ExecuteAsync(null);
+
+        Assert.True(spy.LoadCalls >= 1, $"Expected SyncCommand to trigger ITimelineService.LoadAsync; observed {spy.LoadCalls}.");
+    }
+
+    /// <summary>
+    /// Records every <see cref="ITimelineService.LoadAsync"/> call so tests can
+    /// assert reload behavior without coupling to <c>Items.Count</c>.
+    /// </summary>
+    private sealed class SpyTimelineService : ITimelineService
+    {
+        public int LoadCalls { get; private set; }
+        public int PlaceholderCalls { get; private set; }
+        public List<TimelineFilter> Filters { get; } = new();
+
+        public Task<IReadOnlyList<GitHubNotification>> LoadAsync(TimelineFilter filter, CancellationToken ct = default)
+        {
+            LoadCalls++;
+            Filters.Add(filter);
+            return Task.FromResult<IReadOnlyList<GitHubNotification>>(Array.Empty<GitHubNotification>());
+        }
+
+        public Task<IReadOnlyList<RepositoryRef>> ListRepositoriesAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<RepositoryRef>>(Array.Empty<RepositoryRef>());
+
+        public IReadOnlyList<GitHubNotification> GetPlaceholderItems()
+        {
+            PlaceholderCalls++;
+            return Array.Empty<GitHubNotification>();
+        }
     }
 }
