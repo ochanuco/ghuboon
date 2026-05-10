@@ -8,7 +8,7 @@ public class AccountRepositoryTests
     [Fact]
     public async Task Upsert_then_get_by_id_roundtrips_account()
     {
-        await using var temp = new TempDatabase();
+        await using var temp = new TempDatabase(seedAccounts: false);
         var repo = new AccountRepository(temp.Factory);
 
         var account = new Account(
@@ -35,7 +35,7 @@ public class AccountRepositoryTests
     [Fact]
     public async Task Upsert_replaces_existing_row_with_same_id()
     {
-        await using var temp = new TempDatabase();
+        await using var temp = new TempDatabase(seedAccounts: false);
         var repo = new AccountRepository(temp.Factory);
 
         var initial = new Account(
@@ -62,7 +62,7 @@ public class AccountRepositoryTests
     [Fact]
     public async Task List_returns_all_accounts_in_creation_order()
     {
-        await using var temp = new TempDatabase();
+        await using var temp = new TempDatabase(seedAccounts: false);
         var repo = new AccountRepository(temp.Factory);
 
         var a = new Account("a", "github.com", "a", "ka",
@@ -83,10 +83,32 @@ public class AccountRepositoryTests
     [Fact]
     public async Task GetByIdAsync_returns_null_when_missing()
     {
-        await using var temp = new TempDatabase();
+        await using var temp = new TempDatabase(seedAccounts: false);
         var repo = new AccountRepository(temp.Factory);
 
         var read = await repo.GetByIdAsync("does-not-exist");
         Assert.Null(read);
+    }
+
+    // Issue #12: DeriveApiBaseUrl should normalize input (trim, ensure scheme,
+    // parse Uri) and use uri.Host case-insensitively to detect github.com.
+    [Theory]
+    [InlineData("github.com", "https://api.github.com")]
+    [InlineData("https://github.com", "https://api.github.com")]
+    [InlineData("https://github.com/", "https://api.github.com")]
+    [InlineData("https://github.com/api/v3", "https://api.github.com")]
+    [InlineData("GitHub.COM", "https://api.github.com")]
+    [InlineData("  github.com  ", "https://api.github.com")]
+    [InlineData("ghe.example.com", "https://ghe.example.com/api/v3")]
+    [InlineData("https://ghe.example.com", "https://ghe.example.com/api/v3")]
+    [InlineData("https://ghe.example.com/", "https://ghe.example.com/api/v3")]
+    [InlineData("https://ghe.example.com:8443/", "https://ghe.example.com:8443/api/v3")]
+    [InlineData("http://ghe.internal", "http://ghe.internal/api/v3")]
+    [InlineData("", "https://api.github.com")]
+    [InlineData("   ", "https://api.github.com")]
+    [InlineData(null, "https://api.github.com")]
+    public void DeriveApiBaseUrl_normalizes_input(string? host, string expected)
+    {
+        Assert.Equal(expected, AccountRepository.DeriveApiBaseUrl(host));
     }
 }

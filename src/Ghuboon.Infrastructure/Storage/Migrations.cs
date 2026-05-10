@@ -30,7 +30,9 @@ internal static class Migrations
                    name TEXT NOT NULL,
                    html_url TEXT,
                    created_at TEXT NOT NULL,
-                   updated_at TEXT NOT NULL
+                   updated_at TEXT NOT NULL,
+                   CONSTRAINT fk_repositories_account
+                     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
                  );
 
                  CREATE UNIQUE INDEX ux_repositories_account_full_name
@@ -51,7 +53,9 @@ internal static class Migrations
                    last_read_at TEXT,
                    raw_json TEXT NOT NULL,
                    created_at TEXT NOT NULL,
-                   synced_at TEXT NOT NULL
+                   synced_at TEXT NOT NULL,
+                   CONSTRAINT fk_notifications_account
+                     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
                  );
 
                  CREATE INDEX ix_notifications_account_updated
@@ -66,7 +70,11 @@ internal static class Migrations
                    opened_at TEXT,
                    focused_at TEXT,
                    last_notified_at TEXT,
-                   is_hidden INTEGER NOT NULL DEFAULT 0
+                   is_hidden INTEGER NOT NULL DEFAULT 0,
+                   CONSTRAINT fk_notification_local_states_notification
+                     FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE CASCADE,
+                   CONSTRAINT fk_notification_local_states_account
+                     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
                  );
 
                  CREATE TABLE sync_states (
@@ -75,7 +83,9 @@ internal static class Migrations
                    last_sync_at TEXT,
                    last_successful_sync_at TEXT,
                    rate_limit_remaining INTEGER,
-                   rate_limit_reset_at TEXT
+                   rate_limit_reset_at TEXT,
+                   CONSTRAINT fk_sync_states_account
+                     FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
                  );
 
                  CREATE TABLE app_settings (

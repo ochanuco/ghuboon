@@ -42,6 +42,14 @@ public sealed class NotificationRepository : INotificationRepository
 
         await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
 
+        // Issue #12: persist all timestamps in UTC so range queries
+        // (e.g. ORDER BY updated_at, synced_at < @cutoff) sort lexically the
+        // same way they sort chronologically. Without normalization, ISO-8601
+        // strings carrying different offsets sort by string compare in ways
+        // that diverge from absolute time.
+        // Issue #25: COALESCE incoming last_read_at with the existing column
+        // value so a sync that re-upserts a remote-still-unread notification
+        // (last_read_at = null) does not clobber a locally-set read marker.
         const string sql = """
                            INSERT INTO notifications (
                                id, account_id, thread_id, repository_full_name,
@@ -64,7 +72,7 @@ public sealed class NotificationRepository : INotificationRepository
                                reason = excluded.reason,
                                unread = excluded.unread,
                                updated_at = excluded.updated_at,
-                               last_read_at = excluded.last_read_at,
+                               last_read_at = COALESCE(excluded.last_read_at, last_read_at),
                                raw_json = excluded.raw_json,
                                synced_at = excluded.synced_at;
                            """;
@@ -83,11 +91,11 @@ public sealed class NotificationRepository : INotificationRepository
                 webUrl = notification.Subject.WebUrl,
                 reason = notification.Reason.ToString(),
                 unread = notification.Unread ? 1L : 0L,
-                updatedAt = notification.UpdatedAt.ToString("O"),
-                lastReadAt = notification.LastReadAt?.ToString("O"),
+                updatedAt = notification.UpdatedAt.ToUniversalTime().ToString("O"),
+                lastReadAt = notification.LastReadAt?.ToUniversalTime().ToString("O"),
                 rawJson = rawJson,
-                createdAt = syncedAt.ToString("O"),
-                syncedAt = syncedAt.ToString("O"),
+                createdAt = syncedAt.ToUniversalTime().ToString("O"),
+                syncedAt = syncedAt.ToUniversalTime().ToString("O"),
             },
             cancellationToken: ct)).ConfigureAwait(false);
     }
@@ -147,10 +155,13 @@ public sealed class NotificationRepository : INotificationRepository
     {
         await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
 
+        // Normalize cutoff to UTC so the lexical compare against synced_at
+        // (also stored UTC, see UpsertAsync) is consistent with chronological
+        // ordering regardless of caller offset.
         const string sql = "DELETE FROM notifications WHERE synced_at < @cutoff;";
         return await connection.ExecuteAsync(new CommandDefinition(
             sql,
-            new { cutoff = cutoff.ToString("O") },
+            new { cutoff = cutoff.ToUniversalTime().ToString("O") },
             cancellationToken: ct)).ConfigureAwait(false);
     }
 

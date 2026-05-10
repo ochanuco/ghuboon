@@ -147,6 +147,14 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
         await connection.ExecuteAsync(new CommandDefinition(
             "PRAGMA cipher_compatibility = 4;",
             cancellationToken: ct)).ConfigureAwait(false);
+
+        // Issue #12: SQLite enforces FK constraints only when foreign_keys is
+        // ON for the connection (default is OFF for backwards compatibility),
+        // so we must opt in on every connection. Without this, the FK
+        // declarations in Migrations.cs are recorded but inert.
+        await connection.ExecuteAsync(new CommandDefinition(
+            "PRAGMA foreign_keys = ON;",
+            cancellationToken: ct)).ConfigureAwait(false);
     }
 
     private static void EnsureDirectoryExists(string path)
