@@ -14,7 +14,8 @@ namespace Ghuboon.Core.Domain;
 /// <param name="LastReadAt">Last time the user marked it read locally; null when never read.</param>
 /// <exception cref="ArgumentNullException">
 /// Thrown when any of <paramref name="Id"/>, <paramref name="AccountId"/>,
-/// <paramref name="ThreadId"/>, or <paramref name="RepositoryFullName"/> is null.
+/// <paramref name="ThreadId"/>, <paramref name="RepositoryFullName"/>, or
+/// <paramref name="Subject"/> is null.
 /// </exception>
 /// <exception cref="ArgumentException">
 /// Thrown when any required string is empty/whitespace, when
@@ -105,10 +106,17 @@ public sealed record GitHubNotification
         this.LastReadAt = LastReadAt;
     }
 
-    public string Id { get; init; }
-    public string AccountId { get; init; }
-    public string ThreadId { get; init; }
-    public string RepositoryFullName { get; init; }
+    // Issue #35: Id, AccountId, ThreadId, and RepositoryFullName are part of
+    // the identity invariant validated by the constructor (Id must equal
+    // "{AccountId}:{ThreadId}"). Public `init` would let a `with`-expression
+    // overwrite any of them and skip re-validation, so they are `private init`.
+    // Mutable-feeling properties (Unread, UpdatedAt, LastReadAt, Subject,
+    // Reason) keep public `init` so callers can still produce derived records
+    // like `notif with { Unread = false }`.
+    public string Id { get; private init; }
+    public string AccountId { get; private init; }
+    public string ThreadId { get; private init; }
+    public string RepositoryFullName { get; private init; }
     public NotificationSubject Subject { get; init; }
     public NotificationReason Reason { get; init; }
     public bool Unread { get; init; }
