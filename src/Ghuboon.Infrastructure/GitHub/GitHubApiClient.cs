@@ -26,6 +26,23 @@ public sealed class GitHubApiClient : IGitHubApiClient
     public const string ApiVersion = "2022-11-28";
     public const string ApiVersionHeader = "X-GitHub-Api-Version";
 
+    /// <summary>
+    /// Allowlist of hosts that may receive an Authorization header carrying
+    /// the PAT. Subject URLs come from cached notification payloads and
+    /// could in theory be tampered with (DB rewrite) or drift to an
+    /// unexpected origin (GHES vs GitHub.com), so we guard each absolute-URL
+    /// fetch path against this set before sending the credential.
+    /// </summary>
+    private static readonly HashSet<string> AllowedAuthHosts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "api.github.com",
+    };
+
+    private static bool IsAllowedAuthHost(Uri uri) =>
+        uri is not null
+        && uri.Scheme == Uri.UriSchemeHttps
+        && AllowedAuthHosts.Contains(uri.Host);
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true,
@@ -222,6 +239,16 @@ public sealed class GitHubApiClient : IGitHubApiClient
             return null;
         }
 
+        // Refuse to send the Authorization header to any host other than the
+        // GitHub API allowlist — subject URLs originate from cached payloads
+        // and can drift / be tampered with, and the PAT must never reach a
+        // third-party origin via that path.
+        if (!IsAllowedAuthHost(absolute))
+        {
+            _log.Warning("GetSubjectBody rejected non-allowlisted host {Host}", absolute.Host);
+            return null;
+        }
+
         // Build a fresh request bypassing the BaseAddress; subject_url is a fully
         // qualified GitHub API URL pointing at /repos/{owner}/{repo}/{pulls|issues|...}/{n}
         // (or comment / commit / discussion variants).
@@ -359,6 +386,11 @@ public sealed class GitHubApiClient : IGitHubApiClient
     private async Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndUserAsync(string pat, string subjectApiUrl, CancellationToken ct)
     {
         if (!Uri.TryCreate(subjectApiUrl, UriKind.Absolute, out var absolute)) return (null, null);
+        if (!IsAllowedAuthHost(absolute))
+        {
+            _log.Warning("GetSubjectBodyAndUser rejected non-allowlisted host {Host}", absolute.Host);
+            return (null, null);
+        }
         using var req = new HttpRequestMessage(HttpMethod.Get, absolute);
         req.Headers.UserAgent.ParseAdd(UserAgent);
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(AcceptMediaType));
@@ -391,6 +423,11 @@ public sealed class GitHubApiClient : IGitHubApiClient
     {
         var withQuery = $"{commentsUrl}?per_page=1&sort=created&direction=desc";
         if (!Uri.TryCreate(withQuery, UriKind.Absolute, out var absolute)) return (null, null);
+        if (!IsAllowedAuthHost(absolute))
+        {
+            _log.Warning("FetchLatestIssueCommentDetails rejected non-allowlisted host {Host}", absolute.Host);
+            return (null, null);
+        }
         using var req = new HttpRequestMessage(HttpMethod.Get, absolute);
         req.Headers.UserAgent.ParseAdd(UserAgent);
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(AcceptMediaType));
@@ -426,6 +463,12 @@ public sealed class GitHubApiClient : IGitHubApiClient
         var withQuery = $"{commentsUrl}?per_page=1&sort=created&direction=desc";
         if (!Uri.TryCreate(withQuery, UriKind.Absolute, out var absolute))
         {
+            return null;
+        }
+
+        if (!IsAllowedAuthHost(absolute))
+        {
+            _log.Warning("FetchLatestIssueCommentBody rejected non-allowlisted host {Host}", absolute.Host);
             return null;
         }
 

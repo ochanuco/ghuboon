@@ -478,6 +478,7 @@ public partial class TimelineItemViewModel : ViewModelBase
                 var canonical = await repo.GetByIdAsync(NotificationId, ct).ConfigureAwait(true);
                 apiUrl = canonical?.Subject.ApiUrl;
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { _bodyAttempted = false; throw; }
             catch { /* fallthrough to the network probe */ }
         }
 
@@ -494,6 +495,7 @@ public partial class TimelineItemViewModel : ViewModelBase
                     apiUrl = await api.GetThreadSubjectUrlAsync(pat, ThreadId, ct).ConfigureAwait(true);
                 }
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { _bodyAttempted = false; throw; }
             catch { /* swallowed; we'll just show "(no description)" below */ }
         }
 
@@ -509,6 +511,7 @@ public partial class TimelineItemViewModel : ViewModelBase
             var pat = await _ctx.PatProvider(ct).ConfigureAwait(true);
             if (string.IsNullOrEmpty(pat))
             {
+                BodyLoaded = true;
                 return;
             }
 
@@ -601,6 +604,11 @@ public partial class TimelineItemViewModel : ViewModelBase
         catch (Exception ex)
         {
             _ctx.Log?.Information(ex, "EnsureBodyLoadedAsync failed (non-fatal)");
+            // Settle the row so the detail pane doesn't sit on the loading
+            // spinner forever after a transient fetch failure. The user can
+            // still re-trigger by reloading the timeline; _bodyAttempted
+            // stays true so we don't hammer GitHub for a known-bad row.
+            BodyLoaded = true;
         }
         finally
         {

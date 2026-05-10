@@ -278,15 +278,29 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 // the API client carries the original GitHub JSON forward
                 // (Phase 7 follow-up), this snapshot becomes the real raw
                 // payload without any further sync-side change.
-                // Resolve the actor (latest commenter or PR/Issue author)
-                // up-front so the User column is populated the moment the
-                // row appears in the timeline — no lazy backfill, no per-row
-                // click required, and the OS banner can attribute the event.
-                // Cost: 1-2 extra GitHub calls per event row inserted; the
-                // 304 path above short-circuits the whole loop, so this only
-                // runs when there's genuine new data (typically <5 rows per
-                // sync, well within the 5000 req/h budget).
-                var actorLogin = await ResolveActorLoginAsync(pat, notification, ct).ConfigureAwait(false);
+                // Resolve the actor (commenter for Comment kind, creator
+                // for PR/Issue/...) up-front so the User column is populated
+                // the moment the row appears — no lazy backfill, no per-row
+                // click required.
+                //
+                // Skip the lookup entirely when the cached notification row
+                // already has an actor for this thread: the new event row
+                // inherits the value via SetActorLoginAsync below, and re-
+                // fetching every sync wastes API budget on data we already
+                // have. We still resolve when:
+                //   * isNew (no cached row at all)
+                //   * existing.ActorLogin is null (never resolved)
+                //   * the notification's Kind has changed since the last
+                //     observation (the prior commenter no longer represents
+                //     the new event row's content).
+                var existingKind = existing?.Subject.Kind;
+                var newKind = notification.Subject.Kind;
+                var needsActorLookup = existing is null
+                    || string.IsNullOrEmpty(existing.ActorLogin)
+                    || existingKind != newKind;
+                var actorLogin = needsActorLookup
+                    ? await ResolveActorLoginAsync(pat, notification, ct).ConfigureAwait(false)
+                    : existing!.ActorLogin;
 
                 var snapshot = new NotificationEvent(
                     Id: 0,
@@ -315,10 +329,17 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                     _logger?.Warning(ex, "Append notification event failed for {NotificationId}", notification.Id);
                 }
 
-                // Seed the thread-level actor on first observation (isNew),
-                // so legacy rows lacking per-event actor still attribute to
-                // someone reasonable. Only writes when null at the repo level.
-                if (eventAppended && isNew && !string.IsNullOrEmpty(actorLogin))
+                // Persist the thread-level actor whenever we just resolved a
+                // fresh value AND the cached row still lacks one (or the
+                // resolved value differs from the cache). The notification
+                // row's actor_login feeds the timeline's User column for any
+                // sibling event rows that pre-date sync-time resolution, so
+                // backfilling here closes the gap for existing legacy data
+                // without waiting on a row click.
+                if (eventAppended
+                    && needsActorLookup
+                    && !string.IsNullOrEmpty(actorLogin)
+                    && !string.Equals(existing?.ActorLogin, actorLogin, StringComparison.Ordinal))
                 {
                     try
                     {

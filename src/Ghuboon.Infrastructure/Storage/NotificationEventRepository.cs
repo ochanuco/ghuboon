@@ -134,7 +134,16 @@ public sealed class NotificationEventRepository : INotificationEventRepository
                              SELECT *
                              FROM notification_events
                              WHERE account_id = @accountId
-                             ORDER BY datetime(observed_at) DESC, id DESC
+                             -- Tie-break by source_updated_at BEFORE id so a
+                             -- v4 backfill that stamps every row with the
+                             -- same observed_at still keeps the freshest
+                             -- upstream events inside the window. Without
+                             -- this, source_updated_at-ordered timelines
+                             -- can lose their newest rows when 200+ legacy
+                             -- rows share an observed_at.
+                             ORDER BY datetime(observed_at) DESC,
+                                      datetime(source_updated_at) DESC,
+                                      id DESC
                              LIMIT @limit
                            )
                            ORDER BY datetime(source_updated_at) ASC, id ASC;
