@@ -1,5 +1,6 @@
 using System;
 using System.Threading.Tasks;
+using Dapper;
 using Ghuboon.Core.Domain;
 using Ghuboon.Infrastructure.Storage;
 
@@ -43,30 +44,90 @@ public class NotificationRepositoryExtraTests
     }
 
     [Fact]
-    public async Task Upsert_OverwritesLastReadAt_WithIncomingValue_DocumentsCurrentBehavior()
+    public async Task Upsert_PreservesLocalLastReadAt_WhenIncomingIsNull()
     {
-        // Phase 15 finding: NotificationRepository.Upsert uses
-        // `last_read_at = excluded.last_read_at` so a sync that re-upserts a
-        // remotely-still-unread notification (LastReadAt=null) clobbers any
-        // local read marker. This is a known gap — see notes / issue tracker.
-        // The test pins down current behavior to avoid silent regressions.
-        await using var temp = new TempDatabase();
+        // Issue #25: NotificationRepository.Upsert previously used
+        // `last_read_at = excluded.last_read_at`, so a sync that re-upserted a
+        // remote-still-unread notification (LastReadAt = null) clobbered any
+        // local read marker. The fix uses
+        // `last_read_at = COALESCE(excluded.last_read_at, last_read_at)` so
+        // an incoming null leaves the existing column value alone.
+        await using var temp = new TempDatabase(seedNotifications: false);
         var repo = new NotificationRepository(temp.Factory);
 
         var localReadAt = new DateTimeOffset(2026, 5, 9, 12, 0, 0, TimeSpan.Zero);
         // 1) Locally mark as read.
         await repo.UpsertAsync(Build(unread: false, lastReadAt: localReadAt), "{}", DateTimeOffset.UtcNow);
-        // 2) Remote sync upserts the same row with LastReadAt=null because GitHub
-        //    has not yet propagated the read-state.
+        // 2) Remote sync upserts the same row with LastReadAt = null because
+        //    GitHub has not yet propagated the read-state.
         await repo.UpsertAsync(Build(unread: true, lastReadAt: null), "{}", DateTimeOffset.UtcNow);
 
         var read = await repo.GetByIdAsync("primary:1");
         Assert.NotNull(read);
-        // TODO(local-read-preservation): If we add a "preserve last_read_at when
-        // remote returns null" rule, flip this assertion. Today, the second
-        // upsert replaces last_read_at with null and Unread with true.
+        // Unread flag still tracks the incoming value (server is authoritative
+        // for "is this thread currently unread") — only LastReadAt is preserved.
         Assert.True(read!.Unread);
-        Assert.Null(read.LastReadAt);
+        Assert.Equal(localReadAt, read.LastReadAt);
+    }
+
+    [Fact]
+    public async Task Upsert_AppliesIncomingLastReadAt_WhenNotNull()
+    {
+        // Issue #25: when the incoming value is non-null, COALESCE returns
+        // the incoming side, so the column is updated as before.
+        await using var temp = new TempDatabase(seedNotifications: false);
+        var repo = new NotificationRepository(temp.Factory);
+
+        var firstReadAt = new DateTimeOffset(2026, 5, 9, 12, 0, 0, TimeSpan.Zero);
+        var secondReadAt = new DateTimeOffset(2026, 5, 9, 13, 0, 0, TimeSpan.Zero);
+
+        await repo.UpsertAsync(Build(unread: false, lastReadAt: firstReadAt), "{}", DateTimeOffset.UtcNow);
+        await repo.UpsertAsync(Build(unread: false, lastReadAt: secondReadAt), "{}", DateTimeOffset.UtcNow);
+
+        var read = await repo.GetByIdAsync("primary:1");
+        Assert.NotNull(read);
+        Assert.Equal(secondReadAt, read!.LastReadAt);
+    }
+
+    [Fact]
+    public async Task Upsert_NormalizesUpdatedAtToUtc()
+    {
+        // Issue #12: timestamps should be persisted UTC so the round-trip
+        // preserves absolute time and string-compare ranges line up with
+        // chronological order. Verify that an UpdatedAt with a non-UTC offset
+        // is stored as a UTC ISO-8601 string ending in "Z" or "+00:00".
+        await using var temp = new TempDatabase(seedNotifications: false);
+        var repo = new NotificationRepository(temp.Factory);
+
+        var nonUtc = new DateTimeOffset(2026, 5, 9, 21, 0, 0, TimeSpan.FromHours(9));
+        var notif = Build() with
+        {
+            UpdatedAt = nonUtc,
+            LastReadAt = nonUtc,
+        };
+
+        await repo.UpsertAsync(notif, "{}", nonUtc);
+
+        // Read raw column directly via a connection so we can inspect the
+        // string form, not the DateTimeOffset round-trip (which would be
+        // equal regardless of offset).
+        await using var connection = await temp.Factory.OpenAsync();
+        var stored = await connection.QuerySingleAsync<(string UpdatedAt, string LastReadAt, string SyncedAt)>(
+            """
+            SELECT updated_at AS UpdatedAt, last_read_at AS LastReadAt, synced_at AS SyncedAt
+            FROM notifications WHERE id = @id;
+            """,
+            new { id = notif.Id });
+
+        Assert.EndsWith("+00:00", stored.UpdatedAt, StringComparison.Ordinal);
+        Assert.EndsWith("+00:00", stored.LastReadAt, StringComparison.Ordinal);
+        Assert.EndsWith("+00:00", stored.SyncedAt, StringComparison.Ordinal);
+
+        // And the round-tripped value still equals the original instant.
+        var read = await repo.GetByIdAsync(notif.Id);
+        Assert.NotNull(read);
+        Assert.Equal(nonUtc.UtcDateTime, read!.UpdatedAt.UtcDateTime);
+        Assert.Equal(nonUtc.UtcDateTime, read.LastReadAt!.Value.UtcDateTime);
     }
 
     [Fact]
