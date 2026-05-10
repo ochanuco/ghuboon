@@ -148,4 +148,47 @@ public class StoragePathsTests
             Environment.SetEnvironmentVariable("XDG_DATA_HOME", originalXdg);
         }
     }
+
+    /// <summary>
+    /// Issue #47: <c>ResolveHome</c> previously used <c>??</c>, which only
+    /// fell through on a null HOME. A whitespace HOME would skip
+    /// <see cref="Environment.SpecialFolder.UserProfile"/> entirely and yield
+    /// a corrupt path like <c>"   /Library/Application Support/Ghuboon"</c> on
+    /// macOS or <c>"   /.local/share/Ghuboon"</c> on Linux.
+    ///
+    /// Cross-platform shape: clear LOCALAPPDATA / XDG_DATA_HOME so the
+    /// SpecialFolder.LocalApplicationData (Windows / Linux) and XDG (Linux)
+    /// branches collapse, then set HOME to whitespace. The resolver must
+    /// either pick up SpecialFolder.UserProfile or fall through to
+    /// <see cref="Path.GetTempPath"/> — never compose a path that begins with
+    /// the whitespace prefix.
+    /// </summary>
+    [Fact]
+    public void GetAppDataDirectory_treats_whitespace_home_as_unusable()
+    {
+        var originalHome = Environment.GetEnvironmentVariable("HOME");
+        var originalLocalAppData = Environment.GetEnvironmentVariable("LOCALAPPDATA");
+        var originalXdg = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+        try
+        {
+            // Force the cascade to reach ResolveHome on every platform.
+            Environment.SetEnvironmentVariable("LOCALAPPDATA", string.Empty);
+            Environment.SetEnvironmentVariable("XDG_DATA_HOME", string.Empty);
+            Environment.SetEnvironmentVariable("HOME", "   ");
+
+            var dir = StoragePaths.GetAppDataDirectory();
+
+            Assert.False(string.IsNullOrWhiteSpace(dir));
+            Assert.EndsWith(StoragePaths.AppFolderName, dir, StringComparison.Ordinal);
+            Assert.False(
+                dir.StartsWith("   ", StringComparison.Ordinal),
+                $"Resolver produced a path rooted at whitespace: {dir}");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("HOME", originalHome);
+            Environment.SetEnvironmentVariable("LOCALAPPDATA", originalLocalAppData);
+            Environment.SetEnvironmentVariable("XDG_DATA_HOME", originalXdg);
+        }
+    }
 }
