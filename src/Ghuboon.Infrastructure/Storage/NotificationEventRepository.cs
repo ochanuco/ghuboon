@@ -100,10 +100,12 @@ public sealed class NotificationEventRepository : INotificationEventRepository
 
         await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
 
-        // Order by datetime(observed_at) so legacy/mixed-offset rows keep
-        // chronological order even if a future writer slips in a non-UTC
-        // ISO-8601 string. id DESC breaks ties so two rows observed at the
-        // exact same instant still have a stable order.
+        // Tween-like timeline: newest goes at the bottom, so the UI receives
+        // events oldest-first. We still cap to the latest N events in the
+        // inner query (DESC LIMIT), then re-order ASC for display. Ordering
+        // uses datetime(observed_at) so mixed-offset legacy rows still sort
+        // chronologically; id breaks ties for events observed at the exact
+        // same instant.
         const string sql = """
                            SELECT id AS Id,
                                   account_id AS AccountId,
@@ -120,10 +122,14 @@ public sealed class NotificationEventRepository : INotificationEventRepository
                                   unread AS Unread,
                                   last_read_at AS LastReadAt,
                                   raw_json AS RawJson
-                           FROM notification_events
-                           WHERE account_id = @accountId
-                           ORDER BY datetime(observed_at) DESC, id DESC
-                           LIMIT @limit;
+                           FROM (
+                             SELECT *
+                             FROM notification_events
+                             WHERE account_id = @accountId
+                             ORDER BY datetime(observed_at) DESC, id DESC
+                             LIMIT @limit
+                           )
+                           ORDER BY datetime(observed_at) ASC, id ASC;
                            """;
 
         var rows = await connection.QueryAsync<NotificationEventRow>(new CommandDefinition(

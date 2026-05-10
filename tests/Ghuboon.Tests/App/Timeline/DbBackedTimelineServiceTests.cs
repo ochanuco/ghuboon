@@ -121,14 +121,16 @@ public class DbBackedTimelineServiceTests
     }
 
     [Fact]
-    public async Task Load_OrdersByObservedAtDesc()
+    public async Task Load_OrdersByObservedAtAscending()
     {
+        // Tween-like timeline: oldest-first so the newest event sits at the
+        // bottom of the ListBox in the UI.
         var (svc, _, _) = Build();
         var result = await svc.LoadAsync(TimelineFilter.Default);
 
         for (int i = 1; i < result.Count; i++)
         {
-            Assert.True(result[i - 1].ObservedAt >= result[i].ObservedAt);
+            Assert.True(result[i - 1].ObservedAt <= result[i].ObservedAt);
         }
     }
 

@@ -119,8 +119,10 @@ public class NotificationEventRepositoryTests
     }
 
     [Fact]
-    public async Task ListByAccount_returns_only_matching_account_ordered_by_observed_at_desc()
+    public async Task ListByAccount_returns_only_matching_account_ordered_oldest_first()
     {
+        // Tween-like timeline: newest sits at the bottom, so the repo
+        // returns rows oldest-first for direct binding to the UI ListBox.
         await using var temp = new TempDatabase(seedNotifications: false);
         await SeedNotificationAsync(temp, "acct-1:1", "acct-1");
         await SeedNotificationAsync(temp, "acct-1:2", "acct-1");
@@ -143,8 +145,8 @@ public class NotificationEventRepositoryTests
 
         var list = await repo.ListByAccountAsync("acct-1", 100);
         Assert.Equal(2, list.Count);
-        Assert.Equal("acct-1:2", list[0].NotificationId);
-        Assert.Equal("acct-1:1", list[1].NotificationId);
+        Assert.Equal("acct-1:1", list[0].NotificationId);
+        Assert.Equal("acct-1:2", list[1].NotificationId);
     }
 
     [Fact]

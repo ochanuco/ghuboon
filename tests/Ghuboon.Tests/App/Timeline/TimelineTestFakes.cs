@@ -97,11 +97,17 @@ internal sealed class FakeNotificationEventRepository : INotificationEventReposi
 
     public Task<IReadOnlyList<NotificationEvent>> ListByAccountAsync(string accountId, int limit, CancellationToken ct = default)
     {
-        IReadOnlyList<NotificationEvent> list = Events
+        // Tween-like timeline: take the latest N (DESC) but return them
+        // oldest-first so the UI's ListBox renders newest-at-the-bottom.
+        var newest = Events
             .Where(e => e.AccountId == accountId)
             .OrderByDescending(e => e.ObservedAt)
             .ThenByDescending(e => e.Id)
             .Take(limit)
+            .ToList();
+        IReadOnlyList<NotificationEvent> list = newest
+            .OrderBy(e => e.ObservedAt)
+            .ThenBy(e => e.Id)
             .ToList();
         return Task.FromResult(list);
     }
