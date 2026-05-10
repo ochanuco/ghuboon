@@ -13,6 +13,16 @@ public sealed record SyncState(
     DateTimeOffset? RateLimitResetAt
 )
 {
-    public static SyncState Empty(string accountId) =>
-        new(accountId, null, null, null, null, null);
+    /// <summary>
+    /// Build an empty <see cref="SyncState"/> for the given account.
+    /// </summary>
+    /// <param name="accountId">Owning account id; must be non-null and not whitespace.</param>
+    /// <exception cref="ArgumentException">
+    /// Thrown when <paramref name="accountId"/> is null, empty, or whitespace.
+    /// </exception>
+    public static SyncState Empty(string accountId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(accountId);
+        return new SyncState(accountId, null, null, null, null, null);
+    }
 }
