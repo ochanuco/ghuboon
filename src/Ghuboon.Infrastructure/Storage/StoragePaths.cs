@@ -116,9 +116,25 @@ public static class StoragePaths
     private static bool IsUsablePath([NotNullWhen(true)] string? value) =>
         !string.IsNullOrWhiteSpace(value);
 
-    private static string ResolveHome() =>
-        Environment.GetEnvironmentVariable("HOME")
-        ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+    /// <summary>
+    /// Issue #47: <c>??</c> only falls back when <c>HOME</c> is null, so a
+    /// whitespace-only HOME would produce a corrupt path like <c>"   /Library/..."</c>.
+    /// Validate each candidate with <see cref="IsUsablePath(string?)"/> and
+    /// return null when neither HOME nor SpecialFolder.UserProfile resolves to
+    /// a usable string — callers already guard with IsUsablePath before
+    /// composing a path.
+    /// </summary>
+    private static string? ResolveHome()
+    {
+        var home = Environment.GetEnvironmentVariable("HOME");
+        if (IsUsablePath(home))
+        {
+            return home;
+        }
+
+        var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return IsUsablePath(userProfile) ? userProfile : null;
+    }
 
     public static string GetDefaultDatabasePath() =>
         Path.Combine(GetAppDataDirectory(), DatabaseFileName);
