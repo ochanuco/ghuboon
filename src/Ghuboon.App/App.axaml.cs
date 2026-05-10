@@ -152,7 +152,18 @@ public partial class App : Application
             ItemCtxFactory,
             AppSettingsService.PrimaryAccountId);
 
-        // 10. MainWindow VM.
+        // 10. Settings VM with real abstractions (token validation must hit
+        //     the actual GitHubApiClient, not the design-time stub).
+        var settingsDeps = new SettingsViewModel.SettingsViewModelDependencies(
+            AppSettings: appSettings,
+            CredentialStore: credentialStore,
+            PatValidation: new PatValidationService(apiClient),
+            NotificationRepository: notificationRepo,
+            OpenBrowser: ViewModels.Settings.AboutSettingsViewModel.DefaultOpenBrowser,
+            Clock: TimeProvider.System);
+        var settingsVm = new SettingsViewModel(settingsDeps);
+
+        // 11. MainWindow VM.
         var vm = new MainWindowViewModel(
             appSettings,
             timelineService,
@@ -162,7 +173,8 @@ public partial class App : Application
             {
                 var account = await appSettings.GetPrimaryAccountAsync().ConfigureAwait(false);
                 return account?.Id;
-            })
+            },
+            settingsViewModel: settingsVm)
         {
             RepositoriesSource = timelineService,
             UiDispatcher = action => Dispatcher.UIThread.Post(action),

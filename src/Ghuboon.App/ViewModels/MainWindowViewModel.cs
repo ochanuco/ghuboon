@@ -83,7 +83,8 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
         ITimelineService timelineService,
         INotificationSyncService? syncService,
         IClock? clock,
-        Func<Task<string?>>? accountIdProvider)
+        Func<Task<string?>>? accountIdProvider,
+        SettingsViewModel? settingsViewModel = null)
     {
         _appSettings = appSettings;
         _syncService = syncService;
@@ -92,7 +93,7 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
 
         Tabs = new[] { TabAll, TabReview, TabMention, TabMyPrs, TabWatching };
         Timeline = new TimelineViewModel(timelineService);
-        Settings = new SettingsViewModel(appSettings);
+        Settings = settingsViewModel ?? new SettingsViewModel(appSettings);
         Repositories = new List<RepositoryRef>();
 
         Timeline.PropertyChanged += OnTimelinePropertyChanged;
