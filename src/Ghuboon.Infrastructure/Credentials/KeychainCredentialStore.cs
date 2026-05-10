@@ -142,7 +142,47 @@ public sealed class KeychainCredentialStore : ICredentialStore
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
-        await process.WaitForExitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await process.WaitForExitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation arrived while the security CLI was still running. Tear the
+            // child process tree down so we do not leak a subprocess holding the
+            // Keychain prompt, then drain the exit without re-honoring the cancelled
+            // token. This is a credential-store cleanup path; rethrow the OCE so the
+            // caller can react to cancellation (do not remap to a network/API
+            // exception — the operation was cancelled, it did not fail on the wire).
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                // Process already exited between the HasExited check and Kill.
+            }
+            catch (NotSupportedException)
+            {
+                // Some platforms cannot terminate the whole tree; accept partial cleanup.
+            }
+
+            try
+            {
+                using var drainCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                await process.WaitForExitAsync(drainCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Drain timed out — best effort; the process is detached and will be
+                // reaped by the OS. We still need to surface the original cancellation.
+            }
+
+            throw;
+        }
 
         return new ProcessResult(process.ExitCode, stdout.ToString(), stderr.ToString());
     }
