@@ -60,6 +60,41 @@ public class LastNotifiedTrackerTests
         Assert.True(c);
     }
 
+    /// <summary>
+    /// Issue #32: <c>notification_local_states</c> is keyed by
+    /// <c>(account_id, notification_id)</c>, so the same notification id seen
+    /// under two different accounts must each be markable once independently.
+    /// Pre-fix the v1 PK on <c>notification_id</c> alone caused account A's
+    /// mark to suppress account B's notification entirely.
+    /// </summary>
+    [Fact]
+    public async Task TryMarkAsNotifiedAsync_same_notification_id_under_two_accounts_each_succeeds_once()
+    {
+        await using var temp = new TempDatabase();
+        var tracker = new LastNotifiedTracker(temp.Factory);
+        var now = new DateTimeOffset(2026, 5, 1, 10, 0, 0, TimeSpan.Zero);
+
+        // Both accounts try the same bare notification id. Each must win on
+        // its first call, and each must lose on the second.
+        var firstAcct1 = await tracker.TryMarkAsNotifiedAsync("acct-1", "n-1", now, CancellationToken.None);
+        var firstAcct2 = await tracker.TryMarkAsNotifiedAsync("acct-2", "n-1", now, CancellationToken.None);
+
+        var secondAcct1 = await tracker.TryMarkAsNotifiedAsync("acct-1", "n-1", now.AddMinutes(1), CancellationToken.None);
+        var secondAcct2 = await tracker.TryMarkAsNotifiedAsync("acct-2", "n-1", now.AddMinutes(1), CancellationToken.None);
+
+        Assert.True(firstAcct1);
+        Assert.True(firstAcct2);
+        Assert.False(secondAcct1);
+        Assert.False(secondAcct2);
+
+        // Each account's stored timestamp is its own first mark; account B's
+        // mark must not have overwritten account A's row.
+        var a1Stored = await tracker.GetLastNotifiedAtAsync("acct-1", "n-1");
+        var a2Stored = await tracker.GetLastNotifiedAtAsync("acct-2", "n-1");
+        Assert.Equal(now, a1Stored);
+        Assert.Equal(now, a2Stored);
+    }
+
     [Fact]
     public async Task TryMarkAsNotifiedAsync_concurrent_calls_for_same_id_yield_exactly_one_winner()
     {
@@ -80,15 +115,20 @@ public class LastNotifiedTrackerTests
     }
 
     [Fact]
-    public async Task TryMarkAsNotifiedAsync_after_SetLastNotifiedAsync_returns_false()
+    public async Task TryMarkAsNotifiedAsync_after_prior_mark_returns_false()
     {
+        // Issue #37: <c>SetLastNotifiedAsync</c> was removed because the gate
+        // now uses the atomic <see cref="TryMarkAsNotifiedAsync"/> exclusively.
+        // The original behaviour is still asserted: a second call after a
+        // successful first mark returns false.
         await using var temp = new TempDatabase();
         var tracker = new LastNotifiedTracker(temp.Factory);
         var t = new DateTimeOffset(2026, 5, 1, 10, 0, 0, TimeSpan.Zero);
 
-        await tracker.SetLastNotifiedAsync("acct-1", "n-1", t);
+        var first = await tracker.TryMarkAsNotifiedAsync("acct-1", "n-1", t, CancellationToken.None);
         var marked = await tracker.TryMarkAsNotifiedAsync("acct-1", "n-1", t.AddMinutes(1), CancellationToken.None);
 
+        Assert.True(first);
         Assert.False(marked);
     }
 

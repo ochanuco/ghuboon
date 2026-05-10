@@ -131,6 +131,13 @@ public sealed class NotificationRepository : INotificationRepository
 
         await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
 
+        // Issue #37: a backlog of records persisted by older builds may have
+        // updated_at values with non-UTC offsets. Lexical sort on the raw
+        // column would then diverge from chronological order. Normalize by
+        // ordering on datetime(updated_at), which SQLite parses as the
+        // chronological UTC timestamp regardless of the original offset.
+        // Once a back-fill migration normalizes the column the wrap is a
+        // no-op, but it keeps mixed-offset DBs honest in the meantime.
         const string sql = """
                            SELECT id AS Id, account_id AS AccountId, thread_id AS ThreadId,
                                   repository_full_name AS RepositoryFullName,
@@ -140,7 +147,7 @@ public sealed class NotificationRepository : INotificationRepository
                                   updated_at AS UpdatedAt, last_read_at AS LastReadAt
                            FROM notifications
                            WHERE account_id = @accountId
-                           ORDER BY updated_at DESC;
+                           ORDER BY datetime(updated_at) DESC;
                            """;
 
         var rows = await connection.QueryAsync<NotificationRow>(new CommandDefinition(
@@ -158,7 +165,11 @@ public sealed class NotificationRepository : INotificationRepository
         // Normalize cutoff to UTC so the lexical compare against synced_at
         // (also stored UTC, see UpsertAsync) is consistent with chronological
         // ordering regardless of caller offset.
-        const string sql = "DELETE FROM notifications WHERE synced_at < @cutoff;";
+        // Issue #37: legacy rows may have synced_at written with a non-UTC
+        // offset, in which case raw lexical compare would over- or
+        // under-delete. Wrap synced_at and the parameter in datetime() so
+        // SQLite compares chronological UTC values on both sides.
+        const string sql = "DELETE FROM notifications WHERE datetime(synced_at) < datetime(@cutoff);";
         return await connection.ExecuteAsync(new CommandDefinition(
             sql,
             new { cutoff = cutoff.ToUniversalTime().ToString("O") },
