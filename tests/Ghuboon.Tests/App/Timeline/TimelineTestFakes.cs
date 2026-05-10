@@ -196,10 +196,20 @@ internal static class TimelineTestData
         string? webUrl = null,
         string? threadId = null)
     {
+        // GitHubNotification invariants require Id == "{AccountId}:{ThreadId}".
+        // When threadId is omitted, derive it from the part of `id` after the
+        // first ':' (so historical inputs like ("primary:a", "primary") keep
+        // producing Id="primary:a", ThreadId="a").
+        if (threadId is null)
+        {
+            var sep = id.IndexOf(':');
+            threadId = sep >= 0 ? id[(sep + 1)..] : id;
+        }
+
         return new GitHubNotification(
             id,
             accountId,
-            threadId ?? id,
+            threadId,
             repo,
             new NotificationSubject(subjectType, title, null, webUrl),
             reason,

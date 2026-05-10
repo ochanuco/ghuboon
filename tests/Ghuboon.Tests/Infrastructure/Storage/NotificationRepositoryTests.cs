@@ -12,10 +12,13 @@ public class NotificationRepositoryTests
         NotificationReason reason = NotificationReason.Mention,
         bool unread = true)
     {
+        // GitHubNotification invariants require Id == "{AccountId}:{ThreadId}".
+        var sep = id.IndexOf(':');
+        var threadId = sep >= 0 ? id[(sep + 1)..] : id;
         return new GitHubNotification(
             Id: id,
             AccountId: accountId,
-            ThreadId: "thread-1",
+            ThreadId: threadId,
             RepositoryFullName: repo,
             Subject: new NotificationSubject("PullRequest", "Sample PR", "https://api.github.com/repos/ochanuco/ghuboon/pulls/1", "https://github.com/ochanuco/ghuboon/pull/1"),
             Reason: reason,
