@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
@@ -24,6 +25,13 @@ public partial class TimelineViewModel : ViewModelBase
     private readonly object _filterLock = new();
     private TimelineFilter _filter = TimelineFilter.Default;
     private CancellationTokenSource? _loadCts;
+
+    // Master cache: every event row the service returned on the last DB
+    // fetch, in display order. Tab / repo / search filter changes operate
+    // on this cache in-memory so they no longer round-trip the DB and
+    // (more importantly) don't tear down + rebuild every TimelineItemViewModel.
+    // Sync / explicit reload refreshes this list; in-VM filtering doesn't.
+    private readonly List<TimelineItemViewModel> _allItems = new();
 
     [ObservableProperty]
     private int _unreadCount;
@@ -156,7 +164,17 @@ public partial class TimelineViewModel : ViewModelBase
             _filter = filter;
         }
 
-        _ = ReloadAsync();
+        // Filter changes (tab / repo / search) operate on the in-memory
+        // master cache without re-hitting the DB or rebuilding VMs. Sync
+        // / explicit Reload is what refreshes the master.
+        if (_allItems.Count == 0)
+        {
+            _ = ReloadAsync();
+        }
+        else
+        {
+            ApplyCurrentFilter();
+        }
         OnPropertyChanged(nameof(CurrentFilter));
         OnPropertyChanged(nameof(Filter));
     }
@@ -200,26 +218,49 @@ public partial class TimelineViewModel : ViewModelBase
         IsLoading = true;
         try
         {
-            var filter = Filter;
-            var events = await _timelineService.LoadAsync(filter, cts.Token).ConfigureAwait(false);
+            // Master cache fetch: ALWAYS pull with the default (unfiltered)
+            // request so the VM holds every row the service can offer.
+            // Filtering then happens in ApplyCurrentFilter() against this
+            // cache without hitting the DB on each tab / repo change.
+            var events = await _timelineService.LoadAsync(TimelineFilter.Default, cts.Token).ConfigureAwait(false);
 
-            // Replace the collection on the same thread the observable model lives on.
-            // For unit tests we're already there; in Avalonia, callers should drive this
-            // from the UI thread (Dispatcher.UIThread.Post).
-            DetachAllItems();
-            Items.Clear();
-            // Event-log timeline: services return NotificationEvent rows (one
-            // per observed update); we map each to a TimelineItemViewModel via
-            // the event-aware overload. Issue #43: invoke the factory per row
-            // so each item gets its own context instance (see ctor for full
-            // rationale).
+            // Reuse existing VMs by stable Id where possible — the Body /
+            // BodyAuthorLogin / Unread state on a kept VM survives a Sync,
+            // so the detail pane keeps rendering and the user's read flips
+            // don't snap back to "loading" until the next selection.
+            var existingById = _allItems.ToDictionary(i => i.Id);
+            var newAll = new List<TimelineItemViewModel>(events.Count);
             foreach (var ev in events)
             {
-                var item = new TimelineItemViewModel(ev, _itemContextFactory());
-                AttachItem(item);
-                Items.Add(item);
+                var id = ev.Id > 0 ? $"evt:{ev.Id}" : ev.NotificationId;
+                if (existingById.TryGetValue(id, out var existing))
+                {
+                    newAll.Add(existing);
+                }
+                else
+                {
+                    var item = new TimelineItemViewModel(ev, _itemContextFactory());
+                    AttachItem(item);
+                    newAll.Add(item);
+                }
             }
-            RecomputeAggregates();
+
+            // Detach VMs that fell out of the master (retention prune /
+            // upstream deletion) so their PropertyChanged stops feeding
+            // RecomputeAggregates.
+            var newIds = new HashSet<string>(newAll.Select(i => i.Id), StringComparer.Ordinal);
+            foreach (var stale in _allItems)
+            {
+                if (!newIds.Contains(stale.Id))
+                {
+                    stale.PropertyChanged -= OnItemPropertyChanged;
+                }
+            }
+
+            _allItems.Clear();
+            _allItems.AddRange(newAll);
+
+            ApplyCurrentFilter();
 
             // Backfill ActorLogin for rows that don't have one persisted yet.
             // Fires EnsureBodyLoadedAsync sequentially in the background so the
@@ -227,7 +268,7 @@ public partial class TimelineViewModel : ViewModelBase
             // without the user having to click each row first. Limited to one
             // concurrent fetch to avoid hammering the GitHub API; ~50 rows
             // settles in under a minute and is well within rate limit.
-            _ = Task.Run(() => BackfillActorLoginsAsync(Items.ToArray(), cts.Token), cts.Token);
+            _ = Task.Run(() => BackfillActorLoginsAsync(_allItems.ToArray(), cts.Token), cts.Token);
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested)
         {
@@ -242,6 +283,93 @@ public partial class TimelineViewModel : ViewModelBase
             IsLoading = false;
         }
     }
+
+    /// <summary>
+    /// Re-apply the current <see cref="Filter"/> to the master cache and
+    /// refresh <see cref="Items"/>. Tab / repo / search changes go through
+    /// here without hitting the DB or rebuilding any VM, so the UI updates
+    /// in O(N) over a 200-row cache instead of paying a SQL round-trip
+    /// plus N VM constructions per change.
+    /// </summary>
+    private void ApplyCurrentFilter()
+    {
+        var filter = Filter;
+        var previouslySelectedId = SelectedItem?.Id;
+
+        Items.Clear();
+        foreach (var item in _allItems)
+        {
+            if (MatchesFilter(item, filter))
+            {
+                Items.Add(item);
+            }
+        }
+        RecomputeAggregates();
+
+        // Re-select: prefer the row the user was on; otherwise pick the
+        // newest (last in Tween order) so the detail pane shows the
+        // freshest content for the now-active filter.
+        if (Items.Count > 0)
+        {
+            TimelineItemViewModel? restore = null;
+            if (!string.IsNullOrEmpty(previouslySelectedId))
+            {
+                restore = Items.FirstOrDefault(i => i.Id == previouslySelectedId);
+            }
+            SelectedItem = restore ?? Items[Items.Count - 1];
+        }
+    }
+
+    /// <summary>
+    /// Filter predicate: tab + multi-repo + free-text search. Mirrors the
+    /// rules in <see cref="DbBackedTimelineService.LoadAsync"/> so callers
+    /// can swap between server-side and client-side filtering without a
+    /// behavior change. The service version stays around for direct
+    /// integration tests; the VM-side version is what drives tab switches.
+    /// </summary>
+    private static bool MatchesFilter(TimelineItemViewModel item, TimelineFilter filter)
+    {
+        if (!DbBackedTimelineService.MatchesTab(item.Reason, filter.Tab))
+        {
+            return false;
+        }
+        if (filter.Tab == TimelineTab.MyPrs
+            && item.EventKind != NotificationEventKind.PullRequest)
+        {
+            return false;
+        }
+        if (!filter.MatchesAllRepositories)
+        {
+            if (string.IsNullOrEmpty(item.RepositoryFullName)) return false;
+            var allowed = filter.RepositoryFullNames!;
+            var anyMatch = false;
+            foreach (var name in allowed)
+            {
+                if (string.Equals(name, item.RepositoryFullName, StringComparison.OrdinalIgnoreCase))
+                {
+                    anyMatch = true;
+                    break;
+                }
+            }
+            if (!anyMatch) return false;
+        }
+        if (!string.IsNullOrWhiteSpace(filter.SearchText))
+        {
+            var needle = filter.SearchText.Trim();
+            if (!Contains(item.RepositoryFullName, needle)
+                && !Contains(item.Title, needle)
+                && !Contains(item.Reason.ToString(), needle)
+                && !Contains(item.SubjectType, needle))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool Contains(string? haystack, string needle) =>
+        !string.IsNullOrEmpty(haystack)
+        && haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
 
     private static async Task BackfillActorLoginsAsync(TimelineItemViewModel[] snapshot, CancellationToken ct)
     {

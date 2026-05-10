@@ -35,7 +35,7 @@ public class TimelineViewModelTests
         fake.AddNotification(NotificationReason.Mention, "b/r", "b-row");
 
         var vm = new TimelineViewModel(fake);
-        vm.ApplyFilter(new TimelineFilter(TimelineTab.All, "a/r", null));
+        vm.ApplyFilter(new TimelineFilter(TimelineTab.All, new HashSet<string> { "a/r" }, null));
         await vm.ReloadAsync();
 
         Assert.Single(vm.Items);

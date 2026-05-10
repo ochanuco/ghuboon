@@ -96,7 +96,7 @@ public class DbBackedTimelineServiceTests
     public async Task Load_AppliesRepoFilter()
     {
         var (svc, _, _) = Build();
-        var result = await svc.LoadAsync(new TimelineFilter(TimelineTab.All, "octocat/repo1", null));
+        var result = await svc.LoadAsync(new TimelineFilter(TimelineTab.All, new HashSet<string> { "octocat/repo1" }, null));
 
         Assert.Equal(2, result.Count);
         Assert.All(result, r => Assert.Equal("octocat/repo1", r.RepositoryFullName));
@@ -167,7 +167,7 @@ public class DbBackedTimelineServiceTests
             updatedAt: t0.AddMinutes(-1),
             observedAt: t0.AddMinutes(-1)));
 
-        var result = await svc.LoadAsync(new TimelineFilter(TimelineTab.All, "octo/multi", null));
+        var result = await svc.LoadAsync(new TimelineFilter(TimelineTab.All, new HashSet<string> { "octo/multi" }, null));
         Assert.Equal(2, result.Count);
         Assert.All(result, r => Assert.Equal("primary:e2", r.NotificationId));
     }

@@ -346,81 +346,81 @@ public partial class TimelineItemViewModel : ViewModelBase
             return;
         }
 
-        // Optimistic flip: the user-visible state changes IMMEDIATELY so the
-        // unread dot / counter update without waiting on the network and the
-        // DB writes. The API + DB operations are then fired in parallel
-        // (independent paths); a failed API call reverts Unread and surfaces
-        // a flash. Local DB failures are non-fatal — the next successful sync
-        // reconciles. This swaps a serial ~300 ms+ chain for a sub-frame UI
-        // update, which the user feels as "instant".
+        // Optimistic flip: Unread / OnMarkRead fire IMMEDIATELY on the
+        // calling (UI) thread before any await, so the unread dot and the
+        // aggregated counter update without waiting on the network and DB.
+        // The independent I/O paths (API + notifications row + event-log
+        // siblings) then run in parallel. A failed API call reverts Unread
+        // and surfaces a flash; local DB failures stay non-fatal.
+        // Awaiting the WhenAll keeps the RelayCommand "in-flight" while
+        // the network call finishes (so a rapid second click is still
+        // suppressed via the in-flight slot) without making the user wait
+        // for the visible state.
         Unread = false;
         FlashMessage = null;
         _ctx.OnMarkRead?.Invoke(this);
 
-        // Background dispatch — we don't await the resulting Task because the
-        // user already sees the row flip and we don't want to keep the
-        // CommunityToolkit RelayCommand "in-flight" (which disables further
-        // clicks via AllowConcurrentExecutions = false). The in-flight slot
-        // released in the inner finally guards against double-fires; the
-        // RelayCommand itself returns synchronously after the optimistic flip.
-        _ = Task.Run(async () =>
+        try
         {
-            try
+            var pat = _ctx.PatProvider is null ? null : await _ctx.PatProvider(ct).ConfigureAwait(true);
+            var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
+
+            // API first — if it fails, revert the optimistic flip and skip
+            // local DB writes so the cache stays in sync with the (still-
+            // unread) upstream state. ADR-014: read-sync failures degrade
+            // gracefully; the next sync will reconcile.
+            if (_ctx.Api is not null && !string.IsNullOrEmpty(pat) && !string.IsNullOrEmpty(ThreadId))
             {
-                var pat = _ctx.PatProvider is null ? null : await _ctx.PatProvider(ct).ConfigureAwait(false);
-                var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
-
-                var apiTask = (_ctx.Api is not null && !string.IsNullOrEmpty(pat) && !string.IsNullOrEmpty(ThreadId))
-                    ? _ctx.Api.MarkThreadReadAsync(pat, ThreadId, ct)
-                    : Task.CompletedTask;
-
-                Task notifTask = Task.CompletedTask;
-                if (_ctx.Repository is not null && !string.IsNullOrEmpty(NotificationId) && !string.IsNullOrEmpty(AccountId))
-                {
-                    var updated = new GitHubNotification(
-                        NotificationId,
-                        AccountId,
-                        ThreadId,
-                        RepositoryFullName,
-                        new NotificationSubject(SubjectType, Title, null, WebUrl),
-                        Reason,
-                        Unread: false,
-                        UpdatedAt,
-                        LastReadAt: now);
-                    notifTask = SwallowAsync(_ctx.Repository.UpsertAsync(updated, string.Empty, now, ct), "Persisting local read state failed for " + NotificationId);
-                }
-
-                Task eventTask = Task.CompletedTask;
-                if (_ctx.EventRepository is not null && !string.IsNullOrEmpty(NotificationId) && !string.IsNullOrEmpty(AccountId))
-                {
-                    eventTask = SwallowAsync(
-                        _ctx.EventRepository.MarkThreadAsReadAsync(AccountId, NotificationId, now, ct),
-                        "Marking event-log siblings read failed for " + NotificationId);
-                }
-
                 try
                 {
-                    await apiTask.ConfigureAwait(false);
+                    await _ctx.Api.MarkThreadReadAsync(pat, ThreadId, ct).ConfigureAwait(true);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {
-                    // User cancelled — leave Unread=false (they already saw it flip);
-                    // the next sync will reconcile if needed.
+                    throw;
                 }
                 catch (Exception ex)
                 {
                     _ctx.Log?.Warning(ex, "Mark-as-read API call failed for {ThreadId}", ThreadId);
                     Unread = true;
                     FlashMessage = "Read sync failed; will retry on next sync.";
+                    return;
                 }
+            }
 
-                await Task.WhenAll(notifTask, eventTask).ConfigureAwait(false);
-            }
-            finally
+            // DB writes run in parallel because they're independent paths
+            // (notifications row vs event-log siblings) and we've already
+            // confirmed upstream success.
+            Task notifTask = Task.CompletedTask;
+            if (_ctx.Repository is not null && !string.IsNullOrEmpty(NotificationId) && !string.IsNullOrEmpty(AccountId))
             {
-                Interlocked.Exchange(ref _markAsReadInFlight, 0);
+                var updated = new GitHubNotification(
+                    NotificationId,
+                    AccountId,
+                    ThreadId,
+                    RepositoryFullName,
+                    new NotificationSubject(SubjectType, Title, null, WebUrl),
+                    Reason,
+                    Unread: false,
+                    UpdatedAt,
+                    LastReadAt: now);
+                notifTask = SwallowAsync(_ctx.Repository.UpsertAsync(updated, string.Empty, now, ct), "Persisting local read state failed for " + NotificationId);
             }
-        }, CancellationToken.None);
+
+            Task eventTask = Task.CompletedTask;
+            if (_ctx.EventRepository is not null && !string.IsNullOrEmpty(NotificationId) && !string.IsNullOrEmpty(AccountId))
+            {
+                eventTask = SwallowAsync(
+                    _ctx.EventRepository.MarkThreadAsReadAsync(AccountId, NotificationId, now, ct),
+                    "Marking event-log siblings read failed for " + NotificationId);
+            }
+
+            await Task.WhenAll(notifTask, eventTask).ConfigureAwait(true);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _markAsReadInFlight, 0);
+        }
     }
 
     /// <summary>

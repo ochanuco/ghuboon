@@ -44,7 +44,7 @@ public class DbBackedTimelineServiceFilterTests
     {
         var (svc, _) = Build();
 
-        var filter = new TimelineFilter(TimelineTab.Review, "octocat/repo1", "review");
+        var filter = new TimelineFilter(TimelineTab.Review, new HashSet<string> { "octocat/repo1" }, "review");
         var result = await svc.LoadAsync(filter);
 
         // Two Review rows on octocat/repo1 ("Add CONTRIBUTING" + "Review the PR").
@@ -62,7 +62,7 @@ public class DbBackedTimelineServiceFilterTests
 
         // Tab=Review + repo=octocat/repo1 + search matching only the title
         // "Add CONTRIBUTING" keeps just that one row.
-        var filter = new TimelineFilter(TimelineTab.Review, "octocat/repo1", "CONTRIBUTING");
+        var filter = new TimelineFilter(TimelineTab.Review, new HashSet<string> { "octocat/repo1" }, "CONTRIBUTING");
         var result = await svc.LoadAsync(filter);
 
         Assert.Single(result);
@@ -122,7 +122,7 @@ public class DbBackedTimelineServiceFilterTests
     public async Task Load_RepoFilter_IsOrdinalIgnoreCase()
     {
         var (svc, _) = Build();
-        var result = await svc.LoadAsync(new TimelineFilter(TimelineTab.All, "OCTOCAT/REPO1", null));
+        var result = await svc.LoadAsync(new TimelineFilter(TimelineTab.All, new HashSet<string> { "OCTOCAT/REPO1" }, null));
         // Two rows on octocat/repo1.
         Assert.Equal(2, result.Count);
         Assert.All(result, r => Assert.Equal("octocat/repo1", r.RepositoryFullName));
