@@ -54,4 +54,33 @@ internal static class AppKitInterop
 
     [DllImport(ObjC, EntryPoint = "objc_msgSend")]
     public static extern void SendVoid_IntPtr(IntPtr receiver, IntPtr selector, IntPtr arg1);
+
+    // Used by the cleanup path to balance +1 retain counts from alloc/init.
+    [DllImport(ObjC, EntryPoint = "objc_msgSend")]
+    public static extern void SendVoid(IntPtr receiver, IntPtr selector);
+
+    [DllImport(ObjC, EntryPoint = "objc_disposeClassPair")]
+    public static extern void DisposeClassPair(IntPtr cls);
+
+    // ---- Foundation: NSThread / dispatch_get_main_queue ------------------------
+    // Used by UpdateUnreadCount to detect off-main calls and marshal to the main
+    // dispatch queue (Issue #17). Returning a Boolean from Objective-C requires
+    // calling the dedicated bool-returning overload; libobjc's BOOL is signed
+    // char, so we marshal as I1.
+
+    [DllImport(ObjC, EntryPoint = "objc_msgSend")]
+    [return: MarshalAs(UnmanagedType.I1)]
+    public static extern bool SendBool(IntPtr receiver, IntPtr selector);
+
+    // dispatch_get_main_queue() lives in libdispatch.dylib on macOS but is
+    // re-exported by libSystem (always loaded). Importing from libSystem keeps
+    // us free of an extra DllImport target across runner architectures.
+    [DllImport("/usr/lib/libSystem.dylib", EntryPoint = "dispatch_get_main_queue")]
+    public static extern IntPtr DispatchGetMainQueue();
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void DispatchBlock();
+
+    [DllImport("/usr/lib/libSystem.dylib", EntryPoint = "dispatch_async_f")]
+    public static extern void DispatchAsyncF(IntPtr queue, IntPtr context, IntPtr work);
 }
