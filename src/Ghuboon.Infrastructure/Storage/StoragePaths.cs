@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 
 namespace Ghuboon.Infrastructure.Storage;
@@ -25,13 +26,20 @@ public static class StoragePaths
     /// never throw — a sandbox without HOME or LOCALAPPDATA is a degraded but
     /// recoverable state.
     /// </summary>
+    /// <remarks>
+    /// Issue #37: every candidate is validated with
+    /// <see cref="IsUsablePath(string?)"/> so empty/whitespace strings (which
+    /// SpecialFolder occasionally returns on misconfigured environments) are
+    /// rejected and we keep cascading instead of producing a path like
+    /// <c>"\Ghuboon"</c>.
+    /// </remarks>
     public static string GetAppDataDirectory()
     {
         // Issue #12: prefer SpecialFolder.LocalApplicationData on every
         // platform. It maps to the right OS convention and degrades cleanly
         // when env vars are missing.
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (!string.IsNullOrEmpty(localAppData))
+        if (IsUsablePath(localAppData))
         {
             return Path.Combine(localAppData, AppFolderName);
         }
@@ -39,20 +47,29 @@ public static class StoragePaths
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
         {
             var home = ResolveHome();
-            if (!string.IsNullOrEmpty(home))
+            if (IsUsablePath(home))
             {
                 return Path.Combine(home, "Library", "Application Support", AppFolderName);
             }
         }
         else if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            // SpecialFolder above already handles %LOCALAPPDATA%. If it came
-            // back empty (e.g. sandboxed user profile), try the env var
-            // directly before falling through.
+            // Issue #37: cascade through every Windows fallback before giving
+            // up to %TEMP%. Order matters — LOCALAPPDATA env var first
+            // (matches what SpecialFolder would have returned), then USERPROFILE
+            // + AppData\Local (the canonical layout when LOCALAPPDATA is unset
+            // but USERPROFILE is, e.g. fresh service accounts).
             var winLocal = Environment.GetEnvironmentVariable("LOCALAPPDATA");
-            if (!string.IsNullOrEmpty(winLocal))
+            if (IsUsablePath(winLocal))
             {
                 return Path.Combine(winLocal, AppFolderName);
+            }
+
+            var userProfile = Environment.GetEnvironmentVariable("USERPROFILE")
+                ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (IsUsablePath(userProfile))
+            {
+                return Path.Combine(userProfile, "AppData", "Local", AppFolderName);
             }
         }
         else
@@ -60,13 +77,13 @@ public static class StoragePaths
             // Linux / other Unix. XDG spec wins when set, then HOME-based
             // fallback.
             var xdg = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
-            if (!string.IsNullOrEmpty(xdg))
+            if (IsUsablePath(xdg))
             {
                 return Path.Combine(xdg, AppFolderName);
             }
 
             var home = ResolveHome();
-            if (!string.IsNullOrEmpty(home))
+            if (IsUsablePath(home))
             {
                 return Path.Combine(home, ".local", "share", AppFolderName);
             }
@@ -76,6 +93,14 @@ public static class StoragePaths
         // context where neither LOCALAPPDATA nor HOME resolves.
         return Path.Combine(Path.GetTempPath(), AppFolderName);
     }
+
+    /// <summary>
+    /// Treats null / empty / whitespace-only strings as unusable so the
+    /// resolver does not produce paths like <c>"\Ghuboon"</c> when an env var
+    /// is set to an empty value.
+    /// </summary>
+    private static bool IsUsablePath([NotNullWhen(true)] string? value) =>
+        !string.IsNullOrWhiteSpace(value);
 
     private static string ResolveHome() =>
         Environment.GetEnvironmentVariable("HOME")

@@ -15,7 +15,10 @@ public class MigrationRunnerTests
 
         var versions = await connection.QueryAsync<int>(
             "SELECT version FROM _schema_migrations ORDER BY version;");
-        Assert.Equal(new[] { 1 }, versions);
+        // Issue #32 / #37: migration v2 adds the composite primary key on
+        // notification_local_states and re-applies FK constraints. Both
+        // versions are recorded after a fresh open.
+        Assert.Equal(new[] { 1, 2 }, versions);
 
         var tableNames = (await connection.QueryAsync<string>(
                 "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"))
@@ -53,7 +56,7 @@ public class MigrationRunnerTests
                 "SELECT version FROM _schema_migrations ORDER BY version;"))
             .ToList();
 
-        Assert.Equal(new[] { 1 }, versions);
+        Assert.Equal(new[] { 1, 2 }, versions);
     }
 
     [Fact]
@@ -220,6 +223,201 @@ public class MigrationRunnerTests
         await connection.ExecuteAsync("DELETE FROM notifications WHERE id = 'n1';");
 
         Assert.Equal(0, await connection.QuerySingleAsync<long>("SELECT COUNT(*) FROM notification_local_states WHERE notification_id = 'n1';"));
+    }
+
+    [Fact]
+    public async Task Notification_local_states_uses_composite_primary_key_after_v2()
+    {
+        // Issue #32: after migration v2 the primary key is
+        // (account_id, notification_id), not notification_id alone, so the
+        // same notification id can coexist under different accounts.
+        await using var temp = new TempDatabase(seedAccounts: false);
+        await using var connection = await temp.RawFactory.OpenAsync();
+
+        // Seed two accounts and one notifications row per account.
+        await connection.ExecuteAsync(
+            """
+            INSERT INTO accounts (id, host_url, api_base_url, login, credential_key, created_at, last_validated_at)
+            VALUES ('acct-1', 'github.com', 'https://api.github.com', NULL, 'k1', '2026-05-01T00:00:00+00:00', NULL),
+                   ('acct-2', 'github.com', 'https://api.github.com', NULL, 'k2', '2026-05-01T00:00:00+00:00', NULL);
+
+            INSERT INTO notifications (
+                id, account_id, thread_id, repository_full_name,
+                subject_type, subject_title, subject_api_url, web_url,
+                reason, unread, updated_at, last_read_at,
+                raw_json, created_at, synced_at)
+            VALUES ('shared', 'acct-1', 't1', 'octo/repo',
+                    'PullRequest', 'T', NULL, NULL,
+                    'Mention', 1, '2026-05-01T00:00:00+00:00', NULL,
+                    '{}', '2026-05-01T00:00:00+00:00', '2026-05-01T00:00:00+00:00');
+            """);
+
+        // Two rows with the same notification_id but different account_id —
+        // legal under the composite key.
+        await connection.ExecuteAsync(
+            """
+            INSERT INTO notification_local_states (notification_id, account_id, last_notified_at, is_hidden)
+            VALUES ('shared', 'acct-1', '2026-05-01T00:00:00+00:00', 0),
+                   ('shared', 'acct-2', '2026-05-02T00:00:00+00:00', 0);
+            """);
+
+        var count = await connection.QuerySingleAsync<long>(
+            "SELECT COUNT(*) FROM notification_local_states WHERE notification_id = 'shared';");
+        Assert.Equal(2, count);
+
+        // Re-inserting either (account_id, notification_id) pair must fail —
+        // the composite key still enforces uniqueness within an account.
+        await Assert.ThrowsAsync<Microsoft.Data.Sqlite.SqliteException>(async () =>
+        {
+            await connection.ExecuteAsync(
+                """
+                INSERT INTO notification_local_states (notification_id, account_id, last_notified_at, is_hidden)
+                VALUES ('shared', 'acct-1', '2026-06-01T00:00:00+00:00', 0);
+                """);
+        });
+    }
+
+    [Fact]
+    public async Task Migration_v2_upgrades_pre_fk_schema_in_place_preserving_data()
+    {
+        // Issue #37: hypothetical existing installs were bootstrapped before
+        // FK declarations were added to v1, so the live tables on disk have
+        // no FK CASCADE. Simulate that by manually creating a v1-without-FK
+        // schema and a row of seed data, then running the migration runner.
+        // After upgrade the live FK enforcement and composite PK must be in
+        // effect, and the seed row must still be present.
+        await using var temp = new TempDatabase(seedAccounts: false);
+
+        // Hand-roll a pre-FK v1 schema by opening the connection through the
+        // raw factory (which still applies v1+v2 by default), so we instead
+        // bypass the runner: open directly via Microsoft.Data.Sqlite, set the
+        // encryption pragma, drop everything, and re-create v1 without FKs.
+        await using (var raw = await temp.RawFactory.OpenAsync())
+        {
+            // Wipe whatever the runner just applied.
+            await raw.ExecuteAsync(
+                """
+                DROP TABLE IF EXISTS notification_local_states;
+                DROP TABLE IF EXISTS notifications;
+                DROP TABLE IF EXISTS sync_states;
+                DROP TABLE IF EXISTS repositories;
+                DROP TABLE IF EXISTS accounts;
+                DROP TABLE IF EXISTS app_settings;
+                DROP TABLE IF EXISTS _schema_migrations;
+                """);
+
+            // Recreate a stripped-down v1: same columns, no FK constraints,
+            // notification_local_states with a single-column PK on
+            // notification_id (the legacy shape).
+            await raw.ExecuteAsync(
+                """
+                CREATE TABLE accounts (
+                  id TEXT PRIMARY KEY,
+                  host_url TEXT NOT NULL,
+                  api_base_url TEXT NOT NULL,
+                  login TEXT,
+                  credential_key TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  last_validated_at TEXT
+                );
+                CREATE TABLE repositories (
+                  id TEXT PRIMARY KEY,
+                  account_id TEXT NOT NULL,
+                  full_name TEXT NOT NULL,
+                  owner TEXT NOT NULL,
+                  name TEXT NOT NULL,
+                  html_url TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE notifications (
+                  id TEXT PRIMARY KEY,
+                  account_id TEXT NOT NULL,
+                  thread_id TEXT NOT NULL,
+                  repository_full_name TEXT NOT NULL,
+                  subject_type TEXT NOT NULL,
+                  subject_title TEXT NOT NULL,
+                  subject_api_url TEXT,
+                  web_url TEXT,
+                  reason TEXT NOT NULL,
+                  unread INTEGER NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  last_read_at TEXT,
+                  raw_json TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  synced_at TEXT NOT NULL
+                );
+                CREATE TABLE notification_local_states (
+                  notification_id TEXT PRIMARY KEY,
+                  account_id TEXT NOT NULL,
+                  opened_at TEXT,
+                  focused_at TEXT,
+                  last_notified_at TEXT,
+                  is_hidden INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE sync_states (
+                  account_id TEXT PRIMARY KEY,
+                  notifications_etag TEXT,
+                  last_sync_at TEXT,
+                  last_successful_sync_at TEXT,
+                  rate_limit_remaining INTEGER,
+                  rate_limit_reset_at TEXT
+                );
+                CREATE TABLE app_settings (
+                  key TEXT PRIMARY KEY,
+                  value TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE TABLE _schema_migrations (
+                  version INTEGER PRIMARY KEY,
+                  applied_at TEXT NOT NULL
+                );
+                INSERT INTO _schema_migrations (version, applied_at)
+                VALUES (1, '2026-01-01T00:00:00+00:00');
+
+                INSERT INTO accounts (id, host_url, api_base_url, login, credential_key, created_at, last_validated_at)
+                VALUES ('acct-x', 'github.com', 'https://api.github.com', NULL, 'k', '2026-05-01T00:00:00+00:00', NULL);
+
+                INSERT INTO notifications (
+                    id, account_id, thread_id, repository_full_name,
+                    subject_type, subject_title, subject_api_url, web_url,
+                    reason, unread, updated_at, last_read_at,
+                    raw_json, created_at, synced_at)
+                VALUES ('legacy-1', 'acct-x', 't1', 'octo/repo',
+                        'PullRequest', 'T', NULL, NULL,
+                        'Mention', 1, '2026-05-01T00:00:00+00:00', NULL,
+                        '{}', '2026-05-01T00:00:00+00:00', '2026-05-01T00:00:00+00:00');
+
+                INSERT INTO notification_local_states (notification_id, account_id, last_notified_at, is_hidden)
+                VALUES ('legacy-1', 'acct-x', '2026-05-01T00:00:00+00:00', 0);
+                """);
+        }
+
+        // Now run the full migration runner against the legacy DB. It should
+        // detect that v1 is already recorded and apply only v2.
+        var runner = new MigrationRunner();
+        await using (var conn = await temp.RawFactory.OpenAsync())
+        {
+            var applied = await runner.RunAsync(conn);
+            Assert.Equal(new[] { 2 }, applied.ToArray());
+        }
+
+        // Verify post-migration state.
+        await using (var conn = await temp.RawFactory.OpenAsync())
+        {
+            // The legacy row survived the rename/copy/drop dance.
+            var localStateCount = await conn.QuerySingleAsync<long>(
+                "SELECT COUNT(*) FROM notification_local_states WHERE notification_id = 'legacy-1';");
+            Assert.Equal(1, localStateCount);
+
+            // FK is now live: deleting the parent account cascades to the
+            // notification and to the local state.
+            await conn.ExecuteAsync("DELETE FROM accounts WHERE id = 'acct-x';");
+            Assert.Equal(0, await conn.QuerySingleAsync<long>(
+                "SELECT COUNT(*) FROM notifications WHERE account_id = 'acct-x';"));
+            Assert.Equal(0, await conn.QuerySingleAsync<long>(
+                "SELECT COUNT(*) FROM notification_local_states WHERE account_id = 'acct-x';"));
+        }
     }
 
     [Fact]

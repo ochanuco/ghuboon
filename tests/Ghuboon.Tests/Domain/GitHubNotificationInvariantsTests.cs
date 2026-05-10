@@ -164,4 +164,37 @@ public class GitHubNotificationInvariantsTests
         Assert.False(copied.Unread);
         Assert.Equal(ValidId, copied.Id);
     }
+
+    /// <summary>
+    /// Issue #35: identity-bearing properties (<c>Id</c>, <c>AccountId</c>,
+    /// <c>ThreadId</c>, <c>RepositoryFullName</c>) are <c>private init</c> so a
+    /// <c>with</c>-expression cannot replace one of them and bypass the
+    /// constructor's <c>Id == "{AccountId}:{ThreadId}"</c> check. Verify a
+    /// caller in this assembly cannot reach those setters via reflection-free
+    /// access (the `with` would not compile externally; we exercise the runtime
+    /// shape instead).
+    /// </summary>
+    [Fact]
+    public void Identity_Properties_Are_Private_Init_To_Preserve_Invariants()
+    {
+        var idProperty = typeof(GitHubNotification).GetProperty(nameof(GitHubNotification.Id))!;
+        var accountIdProperty = typeof(GitHubNotification).GetProperty(nameof(GitHubNotification.AccountId))!;
+        var threadIdProperty = typeof(GitHubNotification).GetProperty(nameof(GitHubNotification.ThreadId))!;
+        var repoProperty = typeof(GitHubNotification).GetProperty(nameof(GitHubNotification.RepositoryFullName))!;
+
+        foreach (var prop in new[] { idProperty, accountIdProperty, threadIdProperty, repoProperty })
+        {
+            // The property must have a setter (init), but it must not be public
+            // — otherwise a `with`-expression in another assembly could replace
+            // it and skip constructor validation.
+            var setter = prop.SetMethod;
+            Assert.NotNull(setter);
+            Assert.False(setter!.IsPublic, $"{prop.Name} setter must not be public to preserve identity invariants.");
+        }
+
+        // Mutable companions stay public-init.
+        var unreadSetter = typeof(GitHubNotification).GetProperty(nameof(GitHubNotification.Unread))!.SetMethod;
+        Assert.NotNull(unreadSetter);
+        Assert.True(unreadSetter!.IsPublic, "Unread setter remains public-init for callers that produce derived records.");
+    }
 }

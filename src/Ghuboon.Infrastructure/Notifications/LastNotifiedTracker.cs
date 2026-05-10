@@ -23,9 +23,21 @@ internal sealed class LastNotifiedTracker
 
     /// <summary>
     /// Returns <see cref="DateTimeOffset"/> of the last OS notification fired
-    /// for <paramref name="notificationId"/>, or <c>null</c> if it has never
-    /// been notified.
+    /// for <paramref name="notificationId"/> under the (caller-implicit) account
+    /// scope, or <c>null</c> if it has never been notified.
     /// </summary>
+    /// <remarks>
+    /// Issue #32: <c>notification_local_states</c> is keyed by
+    /// <c>(account_id, notification_id)</c>. The legacy single-id lookup is
+    /// kept here for backwards compatibility with tests that hard-code the
+    /// gate-form id (<c>{accountId}:{threadId}</c>) into the column. When more
+    /// than one row exists for the same notification id (cross-account), we
+    /// take the most recent <c>last_notified_at</c> so the gate degrades to
+    /// "we have already notified this thread" rather than missing the row.
+    /// New callers should prefer
+    /// <see cref="GetLastNotifiedAtAsync(string, string, CancellationToken)"/>
+    /// for an explicit account scope.
+    /// </remarks>
     public async Task<DateTimeOffset?> GetLastNotifiedAtAsync(string notificationId, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(notificationId);
@@ -35,7 +47,9 @@ internal sealed class LastNotifiedTracker
         const string sql = """
                            SELECT last_notified_at
                            FROM notification_local_states
-                           WHERE notification_id = @id;
+                           WHERE notification_id = @id
+                           ORDER BY last_notified_at DESC NULLS LAST
+                           LIMIT 1;
                            """;
 
         var raw = await connection.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
@@ -47,14 +61,15 @@ internal sealed class LastNotifiedTracker
     }
 
     /// <summary>
-    /// Upserts <c>last_notified_at = at</c> for the given notification. Other
-    /// columns on <c>notification_local_states</c> (opened_at, focused_at,
-    /// is_hidden) are left untouched on conflict.
+    /// Account-scoped variant of
+    /// <see cref="GetLastNotifiedAtAsync(string, CancellationToken)"/>. Returns
+    /// the <c>last_notified_at</c> for the row keyed by
+    /// <c>(accountId, notificationId)</c>, or <c>null</c> if no such row
+    /// exists.
     /// </summary>
-    public async Task SetLastNotifiedAsync(
+    public async Task<DateTimeOffset?> GetLastNotifiedAtAsync(
         string accountId,
         string notificationId,
-        DateTimeOffset at,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(accountId);
@@ -63,23 +78,17 @@ internal sealed class LastNotifiedTracker
         await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
 
         const string sql = """
-                           INSERT INTO notification_local_states (
-                               notification_id, account_id, last_notified_at, is_hidden)
-                           VALUES (@id, @account, @at, 0)
-                           ON CONFLICT(notification_id) DO UPDATE SET
-                               account_id = excluded.account_id,
-                               last_notified_at = excluded.last_notified_at;
+                           SELECT last_notified_at
+                           FROM notification_local_states
+                           WHERE account_id = @account AND notification_id = @id;
                            """;
 
-        await connection.ExecuteAsync(new CommandDefinition(
+        var raw = await connection.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
             sql,
-            new
-            {
-                id = notificationId,
-                account = accountId,
-                at = at.ToString("O"),
-            },
+            new { id = notificationId, account = accountId },
             cancellationToken: ct)).ConfigureAwait(false);
+
+        return ParseNullableDate(raw);
     }
 
     /// <summary>
@@ -112,12 +121,17 @@ internal sealed class LastNotifiedTracker
         // happens when no prior notification is recorded. If the row already
         // exists with a non-null last_notified_at, the conflict triggers an
         // update whose WHERE filters it out, yielding 0 affected rows.
+        // Issue #32: the conflict target is the composite key
+        // (account_id, notification_id), so two accounts that legitimately see
+        // the same notification id can each claim their own row independently.
+        // The DO UPDATE branch never touches account_id; it can't change for
+        // an existing primary key, and assigning it would risk silently
+        // re-pointing a row to the wrong account.
         const string sql = """
                            INSERT INTO notification_local_states (
                                notification_id, account_id, last_notified_at, is_hidden)
                            VALUES (@id, @account, @at, 0)
-                           ON CONFLICT(notification_id) DO UPDATE SET
-                               account_id = excluded.account_id,
+                           ON CONFLICT(account_id, notification_id) DO UPDATE SET
                                last_notified_at = excluded.last_notified_at
                            WHERE notification_local_states.last_notified_at IS NULL;
                            """;
@@ -137,11 +151,11 @@ internal sealed class LastNotifiedTracker
 
     /// <summary>
     /// Parses an ISO-8601 round-trip-formatted timestamp written by
-    /// <see cref="SetLastNotifiedAsync"/> / <see cref="TryMarkAsNotifiedAsync"/>.
-    /// Returns <c>null</c> for null/empty input or any value that cannot be
-    /// parsed, rather than throwing &mdash; callers treat "no value" the same
-    /// as "unparseable" and the dedup gate fails open (re-notifies) rather
-    /// than crashing the sync loop on a corrupted row.
+    /// <see cref="TryMarkAsNotifiedAsync"/>. Returns <c>null</c> for null/empty
+    /// input or any value that cannot be parsed, rather than throwing &mdash;
+    /// callers treat "no value" the same as "unparseable" and the dedup gate
+    /// fails open (re-notifies) rather than crashing the sync loop on a
+    /// corrupted row.
     /// </summary>
     internal static DateTimeOffset? ParseNullableDate(string? value)
     {
