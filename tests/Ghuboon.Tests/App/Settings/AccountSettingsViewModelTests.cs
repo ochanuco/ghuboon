@@ -1,3 +1,4 @@
+using System;
 using Ghuboon.App.Services;
 using Ghuboon.App.ViewModels.Settings;
 using Ghuboon.Core.Abstractions;
@@ -134,6 +135,25 @@ public class AccountSettingsViewModelTests
         Assert.True(accounts.Accounts.TryGetValue(AccountSettingsViewModel.PrimaryAccountId, out var stored));
         Assert.Null(stored!.LastValidatedAt);
         Assert.Null(vm.CurrentLogin);
+    }
+
+    [Fact]
+    public async Task Remove_SurfacesStatusMessage_EvenAfterStatusReset()
+    {
+        // Issue #18: removing the token resets ValidationStatus to None which
+        // hides ValidationMessage. The "Token removed." confirmation must
+        // still surface to the user via the dedicated StatusMessage property.
+        var (vm, _, _, _, api) = Build();
+        api.ValidateImpl = _ => new UserValidationResult(true, "octocat", null, null);
+        vm.PatInput = ValidPat;
+        await vm.SaveCommand.ExecuteAsync(null);
+
+        await vm.RemoveCommand.ExecuteAsync(null);
+
+        Assert.Equal(PatValidationStatus.None, vm.ValidationStatus);
+        Assert.False(vm.IsValidationVisible, "Validation block must be hidden when status==None.");
+        Assert.True(vm.IsStatusMessageVisible);
+        Assert.Contains("removed", vm.StatusMessage, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

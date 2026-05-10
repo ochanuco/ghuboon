@@ -41,6 +41,10 @@
                    IsVisible="{Binding IsValidationInvalid}"
                    Foreground="#C62828" />
 
+        <TextBlock Text="{Binding StatusMessage}"
+                   IsVisible="{Binding IsStatusMessageVisible}"
+                   Opacity="0.7" />
+
         <TextBlock Text="The PAT requires the `notifications` scope. The token is sent to GitHub only for validation and is then stored in the macOS Keychain."
                    Opacity="0.55"
                    FontSize="11"

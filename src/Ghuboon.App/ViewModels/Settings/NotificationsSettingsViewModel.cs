@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -22,6 +23,16 @@ public partial class NotificationsSettingsViewModel : ViewModelBase
 
     [ObservableProperty]
     private bool _osNotificationsEnabled = true;
+
+    /// <summary>
+    /// Surfaces a persistence error so the UI can show it. Empty when the last
+    /// toggle persisted successfully.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasPersistError))]
+    private string _persistErrorMessage = string.Empty;
+
+    public bool HasPersistError => !string.IsNullOrEmpty(PersistErrorMessage);
 
     public NotificationsSettingsViewModel(IAppSettingsService appSettings)
     {
@@ -68,9 +79,38 @@ public partial class NotificationsSettingsViewModel : ViewModelBase
             return;
         }
 
-        // Fire-and-forget: persistence failures should not crash the UI thread; the
-        // surface for surfacing errors is the status bar (Phase 14). We capture the
-        // task to avoid analyzer noise but do not await it.
-        _ = _appSettings.SetBoolAsync(OsNotificationsEnabledKey, value);
+        // Persistence failures must surface to the UI (Issue #18). Attach a
+        // continuation that flips the toggle back and exposes the error message
+        // when the write fails. Running the continuation synchronously means
+        // tests that await the persist task observe the reverted state without
+        // needing a UI dispatcher.
+        var task = _appSettings.SetBoolAsync(OsNotificationsEnabledKey, value);
+        _ = task.ContinueWith(
+            t =>
+            {
+                if (t.IsFaulted)
+                {
+                    var ex = t.Exception?.GetBaseException();
+                    Trace.WriteLine($"NotificationsSettingsViewModel: failed to persist '{OsNotificationsEnabledKey}': {ex?.GetType().Name}: {ex?.Message}");
+                    PersistErrorMessage = ex?.Message ?? "Failed to save notification setting.";
+                    // Revert the toggle so the UI reflects what's persisted.
+                    _suppressPersist = true;
+                    try
+                    {
+                        OsNotificationsEnabled = !value;
+                    }
+                    finally
+                    {
+                        _suppressPersist = false;
+                    }
+                }
+                else if (t.IsCompletedSuccessfully)
+                {
+                    PersistErrorMessage = string.Empty;
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 }

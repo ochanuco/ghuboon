@@ -51,6 +51,15 @@ public partial class AccountSettingsViewModel : ViewModelBase
     [NotifyPropertyChangedFor(nameof(IsValidationVisible))]
     private string _validationMessage = string.Empty;
 
+    /// <summary>
+    /// Informational status message shown independently of the validation traffic
+    /// lights (used e.g. after Remove, where ValidationStatus is intentionally
+    /// reset to None).
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsStatusMessageVisible))]
+    private string _statusMessage = string.Empty;
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ValidateCommand))]
     [NotifyCanExecuteChangedFor(nameof(SaveCommand))]
@@ -88,6 +97,8 @@ public partial class AccountSettingsViewModel : ViewModelBase
 
     public bool IsValidationInvalid => ValidationStatus == PatValidationStatus.Invalid;
 
+    public bool IsStatusMessageVisible => !string.IsNullOrEmpty(StatusMessage);
+
     public bool HasAccount => !string.IsNullOrEmpty(CredentialKey);
 
     /// <summary>
@@ -108,7 +119,10 @@ public partial class AccountSettingsViewModel : ViewModelBase
         IsBusy = true;
         try
         {
-            var outcome = await _validator.ValidateAsync(PatInput, ct).ConfigureAwait(true);
+            // Snapshot the input so a concurrent edit cannot desync the
+            // value-being-validated from the field state we read on completion.
+            var pat = PatInput;
+            var outcome = await _validator.ValidateAsync(pat, ct).ConfigureAwait(true);
             ApplyOutcome(outcome);
         }
         finally
@@ -123,7 +137,10 @@ public partial class AccountSettingsViewModel : ViewModelBase
         IsBusy = true;
         try
         {
-            var outcome = await _validator.ValidateAsync(PatInput, ct).ConfigureAwait(true);
+            // Snapshot the input up front so a concurrent edit cannot cause
+            // the saved credential to disagree with the validated PAT.
+            var pat = PatInput;
+            var outcome = await _validator.ValidateAsync(pat, ct).ConfigureAwait(true);
             ApplyOutcome(outcome);
 
             if (outcome.Status != PatValidationStatus.Valid)
@@ -134,7 +151,7 @@ public partial class AccountSettingsViewModel : ViewModelBase
             // Persist credential and account record. ICredentialStore writes to the
             // OS keychain (ADR-007); the PAT never lives anywhere else.
             await _credentialStore
-                .SetAsync(PrimaryCredentialKey, PatInput, ct)
+                .SetAsync(PrimaryCredentialKey, pat, ct)
                 .ConfigureAwait(true);
 
             var now = _clock.GetUtcNow();
@@ -186,8 +203,12 @@ public partial class AccountSettingsViewModel : ViewModelBase
             CurrentLogin = null;
             LastValidatedAt = null;
             PatInput = string.Empty;
+            // Reset the validate-traffic-light, but surface the removal as a
+            // distinct StatusMessage so the user still sees confirmation
+            // (IsValidationVisible suppresses ValidationMessage when status==None).
             ValidationStatus = PatValidationStatus.None;
-            ValidationMessage = "Token removed.";
+            ValidationMessage = string.Empty;
+            StatusMessage = "Token removed.";
         }
         finally
         {
@@ -203,5 +224,8 @@ public partial class AccountSettingsViewModel : ViewModelBase
     {
         ValidationStatus = outcome.Status;
         ValidationMessage = outcome.Message;
+        // Clear any stale removal/info status so the validation result is what
+        // the user sees.
+        StatusMessage = string.Empty;
     }
 }
