@@ -11,13 +11,6 @@
         <vm:TimelineViewModel/>
     </Design.DataContext>
 
-    <UserControl.Resources>
-        <x:Double x:Key="ColUnread">14</x:Double>
-        <x:Double x:Key="ColReason">96</x:Double>
-        <x:Double x:Key="ColRepo">220</x:Double>
-        <x:Double x:Key="ColTime">64</x:Double>
-    </UserControl.Resources>
-
     <Grid RowDefinitions="Auto,*">
 
         <!-- Column header -->
@@ -125,6 +118,7 @@
                                 <Button Grid.Column="5"
                                         Command="{Binding OpenInGitHubCommand}"
                                         ToolTip.Tip="Open on GitHub.com"
+                                        AutomationProperties.Name="Open on GitHub"
                                         Padding="4,1"
                                         MinHeight="22"
                                         VerticalAlignment="Center"
