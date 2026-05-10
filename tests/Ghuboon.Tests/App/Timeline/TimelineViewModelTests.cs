@@ -191,9 +191,10 @@ public class TimelineViewModelTests
             IEnumerable<NotificationEvent> q = Events;
             q = q.Where(n => DbBackedTimelineService.MatchesTab(n.Reason, filter.Tab));
 
-            if (!string.IsNullOrEmpty(filter.RepositoryFullName))
+            if (!filter.MatchesAllRepositories)
             {
-                q = q.Where(n => string.Equals(n.RepositoryFullName, filter.RepositoryFullName, StringComparison.OrdinalIgnoreCase));
+                var allowed = new HashSet<string>(filter.RepositoryFullNames!, StringComparer.OrdinalIgnoreCase);
+                q = q.Where(n => n.RepositoryFullName is not null && allowed.Contains(n.RepositoryFullName));
             }
             if (!string.IsNullOrWhiteSpace(filter.SearchText))
             {

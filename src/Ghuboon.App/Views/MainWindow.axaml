@@ -46,19 +46,52 @@
                            Opacity="0.75"
                            Text="{Binding UnreadCount, StringFormat='Unread: {0}'}" />
 
-                <ComboBox Grid.Column="3"
-                          Margin="12,0,0,0"
-                          PlaceholderText="All repos"
-                          ItemsSource="{Binding Repositories}"
-                          SelectedValue="{Binding SelectedRepositoryFullName}"
-                          SelectedValueBinding="{Binding FullName}"
-                          MinWidth="180">
-                    <ComboBox.ItemTemplate>
-                        <DataTemplate>
-                            <TextBlock Text="{Binding FullName}" />
-                        </DataTemplate>
-                    </ComboBox.ItemTemplate>
-                </ComboBox>
+                <!-- Multi-select repo filter: a button shows the current
+                     selection ("All repos" / "<repo>" / "<N> repos") and
+                     opens a popup with a checkbox per repository. -->
+                <Grid Grid.Column="3" Margin="12,0,0,0" MinWidth="200">
+                    <ToggleButton Name="RepoFilterToggle"
+                                  Content="{Binding RepositoryFilterLabel}"
+                                  HorizontalContentAlignment="Left"
+                                  Padding="10,4" />
+                    <Popup Placement="BottomEdgeAlignedLeft"
+                           PlacementTarget="{Binding ElementName=RepoFilterToggle}"
+                           IsOpen="{Binding #RepoFilterToggle.IsChecked, Mode=TwoWay}"
+                           IsLightDismissEnabled="True">
+                        <Border Background="{DynamicResource SystemRegionBrush}"
+                                BorderBrush="#55000000"
+                                BorderThickness="1"
+                                CornerRadius="4"
+                                Padding="8"
+                                BoxShadow="0 4 16 0 #44000000"
+                                MinWidth="320"
+                                MaxWidth="520">
+                            <DockPanel LastChildFill="True">
+                                <Button DockPanel.Dock="Top"
+                                        Margin="0,0,0,6"
+                                        HorizontalAlignment="Stretch"
+                                        Content="Clear (All repos)"
+                                        Command="{Binding ClearRepositoryFilterCommand}" />
+                                <ScrollViewer MaxHeight="320"
+                                              HorizontalScrollBarVisibility="Auto"
+                                              VerticalScrollBarVisibility="Auto">
+                                    <ItemsControl ItemsSource="{Binding RepositoryFilters}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                                          Margin="0,1">
+                                                    <TextBlock Text="{Binding FullName}"
+                                                               TextWrapping="NoWrap"
+                                                               TextTrimming="None" />
+                                                </CheckBox>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </ScrollViewer>
+                            </DockPanel>
+                        </Border>
+                    </Popup>
+                </Grid>
 
                 <TextBox Grid.Column="4"
                          Margin="12,0"

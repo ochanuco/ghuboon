@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -48,8 +50,13 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
     [NotifyPropertyChangedFor(nameof(SettingsToggleLabel))]
     private bool _isSettingsVisible;
 
-    [ObservableProperty]
-    private string? _selectedRepositoryFullName;
+    /// <summary>
+    /// Multi-select repository filter items. Each entry's <c>IsSelected</c>
+    /// drives the timeline filter — none selected = "All repos". The list
+    /// is rebuilt on <see cref="RefreshRepositoriesAsync"/>, preserving the
+    /// previously-checked names so the user's selection survives a sync.
+    /// </summary>
+    public ObservableCollection<RepositoryFilterItem> RepositoryFilters { get; } = new();
 
     [ObservableProperty]
     private bool _isSyncing;
@@ -145,6 +152,103 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
 
         Repositories = await RepositoriesSource.ListRepositoriesAsync(ct).ConfigureAwait(false);
         OnPropertyChanged(nameof(Repositories));
+
+        // Rebuild the multi-select dropdown items, preserving prior ticks
+        // by full name. Detach handlers from old items before swapping so
+        // a removed repo can't keep firing filter events.
+        var previouslySelected = new HashSet<string>(
+            RepositoryFilters.Where(f => f.IsSelected).Select(f => f.FullName),
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (var existing in RepositoryFilters)
+        {
+            existing.PropertyChanged -= OnRepositoryFilterChanged;
+        }
+        RepositoryFilters.Clear();
+
+        foreach (var repo in Repositories)
+        {
+            if (string.IsNullOrEmpty(repo.FullName))
+            {
+                continue;
+            }
+
+            var item = new RepositoryFilterItem(repo.FullName)
+            {
+                IsSelected = previouslySelected.Contains(repo.FullName),
+            };
+            item.PropertyChanged += OnRepositoryFilterChanged;
+            RepositoryFilters.Add(item);
+        }
+
+        OnPropertyChanged(nameof(RepositoryFilterLabel));
+    }
+
+    private void OnRepositoryFilterChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(RepositoryFilterItem.IsSelected))
+        {
+            return;
+        }
+        ApplyRepositoryFilter();
+        OnPropertyChanged(nameof(RepositoryFilterLabel));
+    }
+
+    private void ApplyRepositoryFilter()
+    {
+        var selected = RepositoryFilters
+            .Where(f => f.IsSelected)
+            .Select(f => f.FullName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        IReadOnlySet<string>? next = selected.Count == 0 ? null : selected;
+        Timeline.ApplyFilter(Timeline.Filter with { RepositoryFullNames = next });
+    }
+
+    /// <summary>
+    /// Button label for the multi-select dropdown:
+    ///   * 0 selected → "All repos"
+    ///   * 1 selected → "<owner/name>"
+    ///   * N selected → "<N> repos"
+    /// </summary>
+    public string RepositoryFilterLabel
+    {
+        get
+        {
+            var count = RepositoryFilters.Count(f => f.IsSelected);
+            return count switch
+            {
+                0 => "All repos",
+                1 => RepositoryFilters.First(f => f.IsSelected).FullName,
+                _ => $"{count} repos",
+            };
+        }
+    }
+
+    /// <summary>
+    /// Clears every selected repository, returning the filter to "All repos".
+    /// Wired to the popup's "Clear" button.
+    /// </summary>
+    [RelayCommand]
+    private void ClearRepositoryFilter()
+    {
+        var anyCleared = false;
+        foreach (var item in RepositoryFilters)
+        {
+            if (item.IsSelected)
+            {
+                item.IsSelected = false;
+                anyCleared = true;
+            }
+        }
+        if (!anyCleared)
+        {
+            // Fire the apply path anyway so the timeline matches the label
+            // (defensive — a stale filter on the timeline VM with no ticked
+            // boxes should round-trip to All repos).
+            ApplyRepositoryFilter();
+            OnPropertyChanged(nameof(RepositoryFilterLabel));
+        }
     }
 
     public async Task InitialLoadAsync(CancellationToken ct = default)
@@ -200,10 +304,6 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
         Timeline.ApplyFilter(Timeline.Filter with { SearchText = value });
     }
 
-    partial void OnSelectedRepositoryFullNameChanged(string? value)
-    {
-        Timeline.ApplyFilter(Timeline.Filter with { RepositoryFullName = string.IsNullOrEmpty(value) ? null : value });
-    }
 
     [RelayCommand]
     private async Task SyncAsync(CancellationToken ct)

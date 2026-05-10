@@ -83,13 +83,14 @@ public sealed class DbBackedTimelineService : ITimelineService
             q = q.Where(n => n.Subject.Kind == NotificationEventKind.PullRequest);
         }
 
-        // Repo filter.
-        if (!string.IsNullOrEmpty(filter.RepositoryFullName))
+        // Repo filter (multi-select). Null/empty set = "All repos".
+        if (!filter.MatchesAllRepositories)
         {
-            q = q.Where(n => string.Equals(
-                n.RepositoryFullName,
-                filter.RepositoryFullName,
-                StringComparison.OrdinalIgnoreCase));
+            // Materialize a case-insensitive comparison set up-front so
+            // each row check is O(1) regardless of how many repos the
+            // user has ticked.
+            var allowed = new HashSet<string>(filter.RepositoryFullNames!, StringComparer.OrdinalIgnoreCase);
+            q = q.Where(n => n.RepositoryFullName is not null && allowed.Contains(n.RepositoryFullName));
         }
 
         // Search across repo / title / reason / subject_type, case-insensitive.
