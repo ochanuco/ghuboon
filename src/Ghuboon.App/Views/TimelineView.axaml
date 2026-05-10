@@ -62,7 +62,7 @@
             <ListBox.ItemTemplate>
                 <DataTemplate DataType="vm:TimelineItemViewModel">
                     <Border Padding="0"
-                            Background="Transparent"
+                            Background="{Binding RowBackgroundColor}"
                             BorderThickness="0,0,0,1"
                             BorderBrush="#11000000">
                         <Border.ContextMenu>

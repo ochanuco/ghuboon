@@ -409,10 +409,19 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
 
                 // OS-banner trigger: any newly-observed event (new thread OR
                 // existing thread with a fresh source_updated_at) deserves a
-                // banner if the reason is high-priority. Without this an
-                // authored PR's CI / state-change / comment activity stayed
-                // silent because isNew was false on every re-observation.
-                if (eventAppended && HighPriorityReasons.Contains(notification.Reason))
+                // banner if the reason is high-priority. Old events that
+                // upstream surfaces for the first time but whose
+                // source_updated_at is older than our previous successful
+                // sync are NOT new from the user's perspective — we either
+                // banner'd them already in a past run, or the user has
+                // since moved on. Re-firing them is the "old notifications
+                // suddenly appear" UX bug. We still let them through on
+                // the very first sync (LastSuccessfulSyncAt is null and
+                // hasPriorSync gates the whole event upstream anyway).
+                if (eventAppended
+                    && HighPriorityReasons.Contains(notification.Reason)
+                    && (state.LastSuccessfulSyncAt is null
+                        || notification.UpdatedAt > state.LastSuccessfulSyncAt))
                 {
                     highPriorityNew.Add(notification);
                 }

@@ -113,6 +113,46 @@ public partial class TimelineItemViewModel : ViewModelBase
     [NotifyPropertyChangedFor(nameof(CommentAuthorBadge))]
     private string? _actorLogin;
 
+    /// <summary>
+    /// True when this row IS the currently-selected row. Set by
+    /// <see cref="TimelineViewModel"/> on selection change. Drives the
+    /// blue selection tint that wins over every other row color.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(RowBackgroundColor))]
+    private bool _isSelectedRow;
+
+    /// <summary>
+    /// True when this row shares its <see cref="NotificationId"/> with the
+    /// currently-focused row. Drives the "related thread" tint so the user
+    /// can see at a glance which TL rows belong to the same PR / Issue.
+    /// Set by <see cref="TimelineViewModel"/> on selection change.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(RowBackgroundColor))]
+    private bool _isRelatedToFocus;
+
+    /// <summary>
+    /// Background tint for the timeline row, in priority order:
+    ///   1. Selected row → blue (always wins).
+    ///   2. Mention / TeamMention → soft red (someone called you out).
+    ///   3. Review request → soft orange (a review is waiting on you,
+    ///      separate from mention so the two action types can be
+    ///      distinguished at a glance).
+    ///   4. Same-thread sibling of the focused row → soft green.
+    ///   5. Otherwise transparent.
+    /// </summary>
+    public string RowBackgroundColor =>
+        IsSelectedRow ? "#BBDEFB"
+        : Reason switch
+        {
+            NotificationReason.Mention => "#FFEBEE",
+            NotificationReason.TeamMention => "#FFEBEE",
+            NotificationReason.Review => "#FFF3E0",
+            _ when IsRelatedToFocus => "#E8F5E9",
+            _ => "Transparent",
+        };
+
     private bool _bodyAttempted;
 
     /// <summary>

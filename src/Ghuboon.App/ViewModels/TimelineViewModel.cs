@@ -59,6 +59,22 @@ public partial class TimelineViewModel : ViewModelBase
 
     partial void OnSelectedItemChanged(TimelineItemViewModel? value)
     {
+        // Repaint per-row tints: selected row gets blue, same-thread
+        // siblings get soft green, every other row drops both flags.
+        // Operate on the master cache so rows that are filtered out of
+        // the current Items still get their flags updated for when they
+        // re-enter the filtered view.
+        var threadId = value?.NotificationId;
+        var hasFocus = !string.IsNullOrEmpty(threadId);
+        foreach (var item in _allItems)
+        {
+            var isSelected = ReferenceEquals(item, value);
+            item.IsSelectedRow = isSelected;
+            item.IsRelatedToFocus = hasFocus
+                && !isSelected
+                && string.Equals(item.NotificationId, threadId, StringComparison.Ordinal);
+        }
+
         if (value is null) return;
         DetailItem = value;
         // Lazy-load the PR/Issue body for the detail pane. Fire-and-forget;
