@@ -26,8 +26,30 @@ public class LastNotifiedTrackerTests
     }
 
     [Fact]
-    public async Task TryMarkAsNotifiedAsync_returns_false_on_subsequent_call_for_same_id()
+    public async Task TryMarkAsNotifiedAsync_re_observation_at_same_timestamp_is_suppressed()
     {
+        // Idempotency on re-observation: a sync that re-fetches the same
+        // event (same source_updated_at) must not re-fire the banner.
+        await using var temp = new TempDatabase();
+        var tracker = new LastNotifiedTracker(temp.Factory);
+        var t = new DateTimeOffset(2026, 5, 1, 10, 0, 0, TimeSpan.Zero);
+
+        var firstMarked = await tracker.TryMarkAsNotifiedAsync("acct-1", "n-1", t, CancellationToken.None);
+        var secondMarked = await tracker.TryMarkAsNotifiedAsync("acct-1", "n-1", t, CancellationToken.None);
+
+        Assert.True(firstMarked);
+        Assert.False(secondMarked);
+
+        var stored = await tracker.GetLastNotifiedAtAsync("n-1");
+        Assert.Equal(t, stored);
+    }
+
+    [Fact]
+    public async Task TryMarkAsNotifiedAsync_newer_event_on_same_thread_refires()
+    {
+        // Event-axis dedup: a fresh source_updated_at on a thread that has
+        // already fired a banner re-fires (Draft → Open transitions, new
+        // comments on authored PRs, CI re-runs all bump updated_at).
         await using var temp = new TempDatabase();
         var tracker = new LastNotifiedTracker(temp.Factory);
         var first = new DateTimeOffset(2026, 5, 1, 10, 0, 0, TimeSpan.Zero);
@@ -37,11 +59,10 @@ public class LastNotifiedTrackerTests
         var secondMarked = await tracker.TryMarkAsNotifiedAsync("acct-1", "n-1", second, CancellationToken.None);
 
         Assert.True(firstMarked);
-        Assert.False(secondMarked);
+        Assert.True(secondMarked);
 
-        // The original mark must not be overwritten by the losing caller.
         var stored = await tracker.GetLastNotifiedAtAsync("n-1");
-        Assert.Equal(first, stored);
+        Assert.Equal(second, stored);
     }
 
     [Fact]
@@ -86,12 +107,13 @@ public class LastNotifiedTrackerTests
         var idAcct1 = "acct-1:n1";
         var idAcct2 = "acct-1:n2"; // also seeded under acct-1 by TempDatabase
 
-        // Each id is markable on its first call and ignored on the second.
+        // Each id is markable on its first call. A re-observation at the
+        // SAME timestamp is suppressed (idempotency for repeated fetches).
         var firstAcct1 = await tracker.TryMarkAsNotifiedAsync("acct-1", idAcct1, now, CancellationToken.None);
         var firstAcct2 = await tracker.TryMarkAsNotifiedAsync("acct-1", idAcct2, now, CancellationToken.None);
 
-        var secondAcct1 = await tracker.TryMarkAsNotifiedAsync("acct-1", idAcct1, now.AddMinutes(1), CancellationToken.None);
-        var secondAcct2 = await tracker.TryMarkAsNotifiedAsync("acct-1", idAcct2, now.AddMinutes(1), CancellationToken.None);
+        var secondAcct1 = await tracker.TryMarkAsNotifiedAsync("acct-1", idAcct1, now, CancellationToken.None);
+        var secondAcct2 = await tracker.TryMarkAsNotifiedAsync("acct-1", idAcct2, now, CancellationToken.None);
 
         Assert.True(firstAcct1);
         Assert.True(firstAcct2);
@@ -126,21 +148,22 @@ public class LastNotifiedTrackerTests
     }
 
     [Fact]
-    public async Task TryMarkAsNotifiedAsync_after_prior_mark_returns_false()
+    public async Task TryMarkAsNotifiedAsync_older_or_equal_event_after_prior_mark_returns_false()
     {
-        // Issue #37: <c>SetLastNotifiedAsync</c> was removed because the gate
-        // now uses the atomic <see cref="TryMarkAsNotifiedAsync"/> exclusively.
-        // The original behaviour is still asserted: a second call after a
-        // successful first mark returns false.
+        // Idempotency on duplicates and out-of-order observations: a
+        // re-fetch that hands us an older or equal timestamp than the
+        // already-recorded mark must not re-fire the banner.
         await using var temp = new TempDatabase();
         var tracker = new LastNotifiedTracker(temp.Factory);
         var t = new DateTimeOffset(2026, 5, 1, 10, 0, 0, TimeSpan.Zero);
 
         var first = await tracker.TryMarkAsNotifiedAsync("acct-1", "n-1", t, CancellationToken.None);
-        var marked = await tracker.TryMarkAsNotifiedAsync("acct-1", "n-1", t.AddMinutes(1), CancellationToken.None);
+        var sameAgain = await tracker.TryMarkAsNotifiedAsync("acct-1", "n-1", t, CancellationToken.None);
+        var earlier = await tracker.TryMarkAsNotifiedAsync("acct-1", "n-1", t.AddMinutes(-1), CancellationToken.None);
 
         Assert.True(first);
-        Assert.False(marked);
+        Assert.False(sameAgain);
+        Assert.False(earlier);
     }
 
     [Fact]

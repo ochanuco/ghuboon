@@ -57,7 +57,6 @@ public sealed class HighPriorityNotificationGate : IDesktopNotificationGate
         }
 
         var accepted = new List<GitHubNotification>(candidates.Count);
-        var now = _clock.UtcNow;
 
         foreach (var candidate in candidates)
         {
@@ -68,13 +67,14 @@ public sealed class HighPriorityNotificationGate : IDesktopNotificationGate
                 continue;
             }
 
-            // Atomic mark-and-claim eliminates the TOCTOU window between a
-            // separate Get and Set: under concurrent sync the SQL statement
-            // either marks the row (returns true) or observes another writer
-            // already marked it (returns false). Only the winner emits the
-            // notification, preventing duplicates.
+            // Pass the candidate's UpdatedAt as the dedup axis: an event
+            // with a newer source_updated_at than the prior banner wins
+            // (and gets its banner), an idempotent re-observation at the
+            // same timestamp loses (suppressed). The previous version
+            // passed `now` and gated only on IS NULL, which silenced
+            // every subsequent event on a thread that ever fired once.
             if (await _tracker
-                    .TryMarkAsNotifiedAsync(accountId, candidate.Id, now, ct)
+                    .TryMarkAsNotifiedAsync(accountId, candidate.Id, candidate.UpdatedAt, ct)
                     .ConfigureAwait(false))
             {
                 accepted.Add(candidate);
