@@ -195,9 +195,17 @@ public partial class App : Application
             }),
             Quit: () => Dispatcher.UIThread.Post(() => desktop.Shutdown())));
 
-        // Mirror UnreadCount changes into the menu-bar host.
-        mainVm.UnreadCountChanged += (_, _) => _menuBar?.UpdateUnreadCount(mainVm.UnreadCount);
-        _menuBar.UpdateUnreadCount(mainVm.UnreadCount);
+        // Mirror UnreadCount changes into the menu-bar host. Marshal to the UI
+        // thread because the Timeline VM may raise the event from a background
+        // continuation (notification arrives, mark-read API completes, etc.) and
+        // AppKit / NSStatusItem mutation is main-thread-only.
+        mainVm.UnreadCountChanged += (_, _) =>
+        {
+            var count = mainVm.UnreadCount;
+            Dispatcher.UIThread.Post(() => _menuBar?.UpdateUnreadCount(count));
+        };
+        var initialCount = mainVm.UnreadCount;
+        Dispatcher.UIThread.Post(() => _menuBar?.UpdateUnreadCount(initialCount));
 
         // Close-to-hide on macOS so the app keeps living in the menu bar.
         // On other platforms _menuBar is a NoOpMenuBarHost; closing should
