@@ -53,10 +53,13 @@ public partial class TimelineViewModel : ViewModelBase
         // Initial synchronous placeholder snapshot; the real impl returns empty,
         // the stub returns demo rows for the previewer / legacy tests.
         // Issue #8: services return domain notifications now, so we map here.
-        var ctx = _itemContextFactory();
+        // Issue #43: invoke the factory per row so each TimelineItemViewModel
+        // gets its own TimelineItemContext; sharing a single instance across
+        // rows defeats per-row state (e.g., MarkRead callbacks targeting one
+        // row can't be customised without leaking into others).
         foreach (var notification in _timelineService.GetPlaceholderItems())
         {
-            var vm = new TimelineItemViewModel(notification, ctx);
+            var vm = new TimelineItemViewModel(notification, _itemContextFactory());
             AttachItem(vm);
             Items.Add(vm);
         }
@@ -180,10 +183,11 @@ public partial class TimelineViewModel : ViewModelBase
             Items.Clear();
             // Issue #8: services return domain notifications now; map to VMs here
             // (Presentation-layer responsibility) using the per-row context.
-            var ctx = _itemContextFactory();
+            // Issue #43: invoke the factory per row so each item gets its own
+            // context instance (see ctor for full rationale).
             foreach (var notification in notifications)
             {
-                var item = new TimelineItemViewModel(notification, ctx);
+                var item = new TimelineItemViewModel(notification, _itemContextFactory());
                 AttachItem(item);
                 Items.Add(item);
             }
