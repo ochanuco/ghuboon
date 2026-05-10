@@ -37,9 +37,22 @@ public partial class TimelineViewModel : ViewModelBase
     [ObservableProperty]
     private TimelineItemViewModel? _selectedItem;
 
+    /// <summary>
+    /// The row whose body the detail pane is currently rendering. Tracks
+    /// <see cref="SelectedItem"/> on positive transitions but is NOT
+    /// cleared when SelectedItem becomes null — the ListBox can drop its
+    /// selection during reload / virtualization without the user actually
+    /// asking to leave the row, and clearing the detail pane in those
+    /// cases is a UX papercut. The user replaces DetailItem by clicking
+    /// a different row; reload-driven nulls are ignored.
+    /// </summary>
+    [ObservableProperty]
+    private TimelineItemViewModel? _detailItem;
+
     partial void OnSelectedItemChanged(TimelineItemViewModel? value)
     {
         if (value is null) return;
+        DetailItem = value;
         // Lazy-load the PR/Issue body for the detail pane. Fire-and-forget;
         // EnsureBodyLoadedAsync swallows non-fatal errors and is idempotent.
         _ = value.EnsureBodyLoadedAsync();

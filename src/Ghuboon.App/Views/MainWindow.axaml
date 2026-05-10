@@ -120,7 +120,7 @@
                     BorderThickness="0,1,0,0"
                     BorderBrush="#22000000"
                     Background="#04000000">
-            <Grid DataContext="{Binding Timeline.SelectedItem}"
+            <Grid DataContext="{Binding Timeline.DetailItem}"
                   RowDefinitions="Auto,*,Auto">
                 <!-- Header: kind badge / repo / actor / event id / relative time -->
                 <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto">
