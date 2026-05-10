@@ -20,6 +20,7 @@ internal sealed class NotificationRow
     public string UpdatedAt { get; set; } = string.Empty;
     public string? LastReadAt { get; set; }
     public string? ActorLogin { get; set; }
+    public string? LatestCommentUrl { get; set; }
 }
 
 /// <summary>
@@ -62,12 +63,12 @@ public sealed class NotificationRepository : INotificationRepository
                                id, account_id, thread_id, repository_full_name,
                                subject_type, subject_title, subject_api_url, web_url,
                                reason, unread, updated_at, last_read_at,
-                               raw_json, created_at, synced_at, actor_login)
+                               raw_json, created_at, synced_at, actor_login, latest_comment_url)
                            VALUES (
                                @id, @accountId, @threadId, @repositoryFullName,
                                @subjectType, @subjectTitle, @subjectApiUrl, @webUrl,
                                @reason, @unread, @updatedAt, @lastReadAt,
-                               @rawJson, @createdAt, @syncedAt, @actorLogin)
+                               @rawJson, @createdAt, @syncedAt, @actorLogin, @latestCommentUrl)
                            ON CONFLICT(id) DO UPDATE SET
                                account_id = excluded.account_id,
                                thread_id = excluded.thread_id,
@@ -82,7 +83,8 @@ public sealed class NotificationRepository : INotificationRepository
                                last_read_at = COALESCE(excluded.last_read_at, last_read_at),
                                raw_json = excluded.raw_json,
                                synced_at = excluded.synced_at,
-                               actor_login = COALESCE(excluded.actor_login, actor_login);
+                               actor_login = COALESCE(excluded.actor_login, actor_login),
+                               latest_comment_url = excluded.latest_comment_url;
                            """;
 
         await connection.ExecuteAsync(new CommandDefinition(
@@ -105,6 +107,7 @@ public sealed class NotificationRepository : INotificationRepository
                 createdAt = syncedAt.ToUniversalTime().ToString("O"),
                 syncedAt = syncedAt.ToUniversalTime().ToString("O"),
                 actorLogin = notification.ActorLogin,
+                latestCommentUrl = notification.Subject.LatestCommentApiUrl,
             },
             cancellationToken: ct)).ConfigureAwait(false);
     }
@@ -122,7 +125,7 @@ public sealed class NotificationRepository : INotificationRepository
                                   subject_api_url AS SubjectApiUrl, web_url AS WebUrl,
                                   reason AS Reason, unread AS Unread,
                                   updated_at AS UpdatedAt, last_read_at AS LastReadAt,
-                                  actor_login AS ActorLogin
+                                  actor_login AS ActorLogin, latest_comment_url AS LatestCommentUrl
                            FROM notifications
                            WHERE id = @id;
                            """;
@@ -155,7 +158,7 @@ public sealed class NotificationRepository : INotificationRepository
                                   subject_api_url AS SubjectApiUrl, web_url AS WebUrl,
                                   reason AS Reason, unread AS Unread,
                                   updated_at AS UpdatedAt, last_read_at AS LastReadAt,
-                                  actor_login AS ActorLogin
+                                  actor_login AS ActorLogin, latest_comment_url AS LatestCommentUrl
                            FROM notifications
                            WHERE account_id = @accountId
                            ORDER BY datetime(updated_at) DESC;
@@ -212,7 +215,7 @@ public sealed class NotificationRepository : INotificationRepository
 
     private static GitHubNotification Map(NotificationRow row)
     {
-        var subject = new NotificationSubject(row.SubjectType, row.SubjectTitle, row.SubjectApiUrl, row.WebUrl);
+        var subject = new NotificationSubject(row.SubjectType, row.SubjectTitle, row.SubjectApiUrl, row.WebUrl, row.LatestCommentUrl);
         var reason = Enum.TryParse<NotificationReason>(row.Reason, ignoreCase: false, out var parsed)
             ? parsed
             : NotificationReason.Unknown;

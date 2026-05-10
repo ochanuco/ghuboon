@@ -71,6 +71,17 @@ public sealed class DbBackedTimelineService : ITimelineService
         // Tab filter.
         q = q.Where(n => MatchesTab(n.Reason, filter.Tab));
 
+        // My PRs is "PR description rows" only — exclude comment events
+        // (CR walkthroughs, replies, etc.) so the tab shows one row per
+        // observed PR state transition (creation, Draft toggle, ready).
+        // Legacy rows that pre-date the latest_comment_url snapshot have
+        // NULL on the column and are kept (IsCommentEvent returns false
+        // when the snapshot is missing).
+        if (filter.Tab == TimelineTab.MyPrs)
+        {
+            q = q.Where(n => !n.Subject.IsCommentEvent);
+        }
+
         // Repo filter.
         if (!string.IsNullOrEmpty(filter.RepositoryFullName))
         {

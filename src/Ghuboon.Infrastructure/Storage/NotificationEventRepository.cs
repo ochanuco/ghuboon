@@ -23,6 +23,7 @@ internal sealed class NotificationEventRow
     public string? LastReadAt { get; set; }
     public string RawJson { get; set; } = string.Empty;
     public string? ActorLogin { get; set; }
+    public string? LatestCommentUrl { get; set; }
 }
 
 /// <summary>
@@ -58,12 +59,12 @@ public sealed class NotificationEventRepository : INotificationEventRepository
                                account_id, notification_id, thread_id, repository_full_name,
                                subject_type, subject_title, subject_api_url, web_url,
                                reason, source_updated_at, observed_at,
-                               unread, last_read_at, raw_json, actor_login)
+                               unread, last_read_at, raw_json, actor_login, latest_comment_url)
                            VALUES (
                                @accountId, @notificationId, @threadId, @repositoryFullName,
                                @subjectType, @subjectTitle, @subjectApiUrl, @webUrl,
                                @reason, @sourceUpdatedAt, @observedAt,
-                               @unread, @lastReadAt, @rawJson, @actorLogin)
+                               @unread, @lastReadAt, @rawJson, @actorLogin, @latestCommentUrl)
                            ON CONFLICT (account_id, notification_id, source_updated_at) DO NOTHING;
                            """;
 
@@ -86,6 +87,7 @@ public sealed class NotificationEventRepository : INotificationEventRepository
                 lastReadAt = ev.LastReadAt?.ToUniversalTime().ToString("O"),
                 rawJson = ev.RawJson,
                 actorLogin = ev.ActorLogin,
+                latestCommentUrl = ev.Subject.LatestCommentApiUrl,
             },
             cancellationToken: ct)).ConfigureAwait(false);
 
@@ -126,7 +128,8 @@ public sealed class NotificationEventRepository : INotificationEventRepository
                                   unread AS Unread,
                                   last_read_at AS LastReadAt,
                                   raw_json AS RawJson,
-                                  actor_login AS ActorLogin
+                                  actor_login AS ActorLogin,
+                                  latest_comment_url AS LatestCommentUrl
                            FROM (
                              SELECT *
                              FROM notification_events
@@ -250,7 +253,7 @@ public sealed class NotificationEventRepository : INotificationEventRepository
 
     private static NotificationEvent Map(NotificationEventRow row)
     {
-        var subject = new NotificationSubject(row.SubjectType, row.SubjectTitle, row.SubjectApiUrl, row.WebUrl);
+        var subject = new NotificationSubject(row.SubjectType, row.SubjectTitle, row.SubjectApiUrl, row.WebUrl, row.LatestCommentUrl);
         var reason = Enum.TryParse<NotificationReason>(row.Reason, ignoreCase: false, out var parsed)
             ? parsed
             : NotificationReason.Unknown;

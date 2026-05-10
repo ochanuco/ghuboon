@@ -407,5 +407,24 @@ internal static class Migrations
                  ALTER TABLE notifications ADD COLUMN actor_login TEXT;
                  ALTER TABLE notification_events ADD COLUMN actor_login TEXT;
                  """),
+
+        // ----------------------------------------------------------------
+        // Migration v6 (per-event latest_comment_url snapshot):
+        //   GitHub's notification listing surfaces subject.latest_comment_url,
+        //   which points either at the subject (no comment yet / non-comment
+        //   activity) or at a /comments/{id} endpoint (comment activity).
+        //   Capturing it per event lets the timeline distinguish "PR
+        //   description rows" from "comment rows" without an extra fetch,
+        //   so the My PRs tab can filter to PR-creation / Draft / state-
+        //   change events and skip the noise of CR / bot comment threads.
+        //   Legacy rows keep latest_comment_url = NULL; the filter treats
+        //   NULL as "unknown / include" so old data stays visible.
+        new Migration(
+            Version: 6,
+            Name: "latest_comment_url_columns",
+            Sql: """
+                 ALTER TABLE notifications ADD COLUMN latest_comment_url TEXT;
+                 ALTER TABLE notification_events ADD COLUMN latest_comment_url TEXT;
+                 """),
     };
 }
