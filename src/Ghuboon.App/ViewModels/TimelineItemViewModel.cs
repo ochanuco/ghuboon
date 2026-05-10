@@ -346,35 +346,36 @@ public partial class TimelineItemViewModel : ViewModelBase
             return;
         }
 
-        try
-        {
-            var pat = _ctx.PatProvider is null ? null : await _ctx.PatProvider(ct).ConfigureAwait(false);
+        // Optimistic flip: the user-visible state changes IMMEDIATELY so the
+        // unread dot / counter update without waiting on the network and the
+        // DB writes. The API + DB operations are then fired in parallel
+        // (independent paths); a failed API call reverts Unread and surfaces
+        // a flash. Local DB failures are non-fatal — the next successful sync
+        // reconciles. This swaps a serial ~300 ms+ chain for a sub-frame UI
+        // update, which the user feels as "instant".
+        Unread = false;
+        FlashMessage = null;
+        _ctx.OnMarkRead?.Invoke(this);
 
+        // Background dispatch — we don't await the resulting Task because the
+        // user already sees the row flip and we don't want to keep the
+        // CommunityToolkit RelayCommand "in-flight" (which disables further
+        // clicks via AllowConcurrentExecutions = false). The in-flight slot
+        // released in the inner finally guards against double-fires; the
+        // RelayCommand itself returns synchronously after the optimistic flip.
+        _ = Task.Run(async () =>
+        {
             try
             {
-                if (_ctx.Api is not null && !string.IsNullOrEmpty(pat) && !string.IsNullOrEmpty(ThreadId))
-                {
-                    await _ctx.Api.MarkThreadReadAsync(pat, ThreadId, ct).ConfigureAwait(false);
-                }
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                // Phase 10 acceptance: failed read sync must not crash the app and
-                // the next sync reconciles. We surface the failure quietly.
-                _ctx.Log?.Warning(ex, "Mark-as-read API call failed for {ThreadId}", ThreadId);
-                FlashMessage = "Read sync failed; will retry on next sync.";
-                return;
-            }
+                var pat = _ctx.PatProvider is null ? null : await _ctx.PatProvider(ct).ConfigureAwait(false);
+                var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
 
-            var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
+                var apiTask = (_ctx.Api is not null && !string.IsNullOrEmpty(pat) && !string.IsNullOrEmpty(ThreadId))
+                    ? _ctx.Api.MarkThreadReadAsync(pat, ThreadId, ct)
+                    : Task.CompletedTask;
 
-            if (_ctx.Repository is not null && !string.IsNullOrEmpty(NotificationId) && !string.IsNullOrEmpty(AccountId))
-            {
-                try
+                Task notifTask = Task.CompletedTask;
+                if (_ctx.Repository is not null && !string.IsNullOrEmpty(NotificationId) && !string.IsNullOrEmpty(AccountId))
                 {
                     var updated = new GitHubNotification(
                         NotificationId,
@@ -386,40 +387,60 @@ public partial class TimelineItemViewModel : ViewModelBase
                         Unread: false,
                         UpdatedAt,
                         LastReadAt: now);
-                    await _ctx.Repository.UpsertAsync(updated, string.Empty, now, ct).ConfigureAwait(false);
+                    notifTask = SwallowAsync(_ctx.Repository.UpsertAsync(updated, string.Empty, now, ct), "Persisting local read state failed for " + NotificationId);
                 }
-                catch (Exception ex)
-                {
-                    _ctx.Log?.Warning(ex, "Persisting local read state failed for {Id}", NotificationId);
-                }
-            }
 
-            // Event-log timeline: flip every sibling event row for the same
-            // thread so the timeline does not keep showing prior observations
-            // as unread after the user resolves a thread. Failure here is
-            // logged but non-fatal — the latest state in `notifications` is
-            // already advanced and the next sync will reconcile.
-            if (_ctx.EventRepository is not null && !string.IsNullOrEmpty(NotificationId) && !string.IsNullOrEmpty(AccountId))
-            {
+                Task eventTask = Task.CompletedTask;
+                if (_ctx.EventRepository is not null && !string.IsNullOrEmpty(NotificationId) && !string.IsNullOrEmpty(AccountId))
+                {
+                    eventTask = SwallowAsync(
+                        _ctx.EventRepository.MarkThreadAsReadAsync(AccountId, NotificationId, now, ct),
+                        "Marking event-log siblings read failed for " + NotificationId);
+                }
+
                 try
                 {
-                    await _ctx.EventRepository
-                        .MarkThreadAsReadAsync(AccountId, NotificationId, now, ct)
-                        .ConfigureAwait(false);
+                    await apiTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    // User cancelled — leave Unread=false (they already saw it flip);
+                    // the next sync will reconcile if needed.
                 }
                 catch (Exception ex)
                 {
-                    _ctx.Log?.Warning(ex, "Marking event-log siblings read failed for {NotificationId}", NotificationId);
+                    _ctx.Log?.Warning(ex, "Mark-as-read API call failed for {ThreadId}", ThreadId);
+                    Unread = true;
+                    FlashMessage = "Read sync failed; will retry on next sync.";
                 }
-            }
 
-            Unread = false;
-            FlashMessage = null;
-            _ctx.OnMarkRead?.Invoke(this);
-        }
-        finally
+                await Task.WhenAll(notifTask, eventTask).ConfigureAwait(false);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _markAsReadInFlight, 0);
+            }
+        }, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Swallow exceptions on a background task so a single sub-task failure
+    /// doesn't fault the WhenAll. Each callsite already passes a per-task
+    /// log message for diagnostics.
+    /// </summary>
+    private async Task SwallowAsync(Task task, string failureMessage)
+    {
+        try
         {
-            Interlocked.Exchange(ref _markAsReadInFlight, 0);
+            await task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // not surfaced
+        }
+        catch (Exception ex)
+        {
+            _ctx.Log?.Warning(ex, "{Message}", failureMessage);
         }
     }
 
