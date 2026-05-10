@@ -273,6 +273,13 @@ public sealed class GitHubApiClient : IGitHubApiClient
     public Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default)
         => GetThreadSubjectFieldAsync(pat, threadId, "url", ct);
 
+    public async Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndAuthorAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pat);
+        if (string.IsNullOrWhiteSpace(subjectApiUrl)) return (null, null);
+        return await GetSubjectBodyAndUserAsync(pat, subjectApiUrl, ct).ConfigureAwait(false);
+    }
+
     public async Task<(string? Body, string? AuthorLogin)> GetLatestCommentDetailsAsync(string pat, string threadId, CancellationToken ct = default)
     {
         var commentUrl = await GetThreadSubjectFieldAsync(pat, threadId, "latest_comment_url", ct).ConfigureAwait(false);

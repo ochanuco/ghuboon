@@ -278,6 +278,16 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 // the API client carries the original GitHub JSON forward
                 // (Phase 7 follow-up), this snapshot becomes the real raw
                 // payload without any further sync-side change.
+                // Resolve the actor (latest commenter or PR/Issue author)
+                // up-front so the User column is populated the moment the
+                // row appears in the timeline — no lazy backfill, no per-row
+                // click required, and the OS banner can attribute the event.
+                // Cost: 1-2 extra GitHub calls per event row inserted; the
+                // 304 path above short-circuits the whole loop, so this only
+                // runs when there's genuine new data (typically <5 rows per
+                // sync, well within the 5000 req/h budget).
+                var actorLogin = await ResolveActorLoginAsync(pat, notification, ct).ConfigureAwait(false);
+
                 var snapshot = new NotificationEvent(
                     Id: 0,
                     AccountId: notification.AccountId,
@@ -290,10 +300,12 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                     ObservedAt: now,
                     Unread: notification.Unread,
                     LastReadAt: notification.LastReadAt,
-                    RawJson: rawJson);
+                    RawJson: rawJson,
+                    ActorLogin: actorLogin);
+                var eventAppended = false;
                 try
                 {
-                    await _eventRepository.TryAppendAsync(snapshot, ct).ConfigureAwait(false);
+                    eventAppended = await _eventRepository.TryAppendAsync(snapshot, ct).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -303,17 +315,40 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                     _logger?.Warning(ex, "Append notification event failed for {NotificationId}", notification.Id);
                 }
 
+                // Seed the thread-level actor on first observation (isNew),
+                // so legacy rows lacking per-event actor still attribute to
+                // someone reasonable. Only writes when null at the repo level.
+                if (eventAppended && isNew && !string.IsNullOrEmpty(actorLogin))
+                {
+                    try
+                    {
+                        await _notificationRepository
+                            .SetActorLoginAsync(notification.Id, actorLogin!, ct)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger?.Information(ex, "Seeding actor_login for {NotificationId} failed (non-fatal)", notification.Id);
+                    }
+                }
+
                 if (isNew)
                 {
                     newCount++;
-                    if (HighPriorityReasons.Contains(notification.Reason))
-                    {
-                        highPriorityNew.Add(notification);
-                    }
                 }
                 else
                 {
                     updatedCount++;
+                }
+
+                // OS-banner trigger: any newly-observed event (new thread OR
+                // existing thread with a fresh source_updated_at) deserves a
+                // banner if the reason is high-priority. Without this an
+                // authored PR's CI / state-change / comment activity stayed
+                // silent because isNew was false on every re-observation.
+                if (eventAppended && HighPriorityReasons.Contains(notification.Reason))
+                {
+                    highPriorityNew.Add(notification);
                 }
 
                 if (!string.IsNullOrEmpty(notification.RepositoryFullName) &&
@@ -615,6 +650,40 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
         }
 
         return (fullName[..slash], fullName[(slash + 1)..]);
+    }
+
+    /// <summary>
+    /// Best-effort actor lookup at sync time. Resolves the PR/Issue creator
+    /// (i.e. the thread owner), NOT the latest commenter. The User column
+    /// in the timeline represents "whose thread is this" — for self-authored
+    /// PRs that's @ochanuco regardless of whether @coderabbitai later
+    /// commented. The latest commenter is surfaced separately in the detail
+    /// pane via BodyAuthorLogin. Returns null on any failure — the row
+    /// falls back to lazy backfill on click.
+    /// </summary>
+    private async Task<string?> ResolveActorLoginAsync(string pat, GitHubNotification notification, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(notification.Subject.ApiUrl))
+        {
+            return null;
+        }
+
+        try
+        {
+            var subj = await _apiClient
+                .GetSubjectBodyAndAuthorAsync(pat, notification.Subject.ApiUrl, ct)
+                .ConfigureAwait(false);
+            return subj.AuthorLogin;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.Information(ex, "Actor lookup at sync time failed for {NotificationId} (non-fatal)", notification.Id);
+            return null;
+        }
     }
 
     private static string SynthesizeRawJson(GitHubNotification notification)

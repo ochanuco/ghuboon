@@ -62,6 +62,15 @@ public interface IGitHubApiClient
     /// back to the repo owner.
     /// </summary>
     Task<(string? Body, string? AuthorLogin)> GetLatestCommentDetailsAsync(string pat, string threadId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Same as <see cref="GetSubjectBodyAsync"/> but also returns the
+    /// subject's author login (the PR/Issue creator). Used by description-
+    /// mode rows so the User column attributes the row to the PR author
+    /// (e.g. <c>@ochanuco</c> for self-authored PRs) instead of inheriting
+    /// a previously-persisted commenter actor.
+    /// </summary>
+    Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndAuthorAsync(string pat, string subjectApiUrl, CancellationToken ct = default);
 }
 
 /// <summary>

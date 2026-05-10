@@ -98,6 +98,7 @@ public partial class TimelineItemViewModel : ViewModelBase
     private bool _bodyLoaded;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CommentAuthorBadge))]
     private string? _bodyAuthorLogin;
 
     /// <summary>
@@ -109,6 +110,7 @@ public partial class TimelineItemViewModel : ViewModelBase
     /// </summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(DisplayUserLogin))]
+    [NotifyPropertyChangedFor(nameof(CommentAuthorBadge))]
     private string? _actorLogin;
 
     private bool _bodyAttempted;
@@ -241,6 +243,19 @@ public partial class TimelineItemViewModel : ViewModelBase
     /// </summary>
     public string DisplayUserLogin =>
         string.IsNullOrEmpty(ActorLogin) ? OwnerLogin : ActorLogin!;
+
+    /// <summary>
+    /// Detail-pane sub-line shown next to the PR creator. When the body
+    /// being displayed is a comment (BodyAuthorLogin differs from the
+    /// thread owner ActorLogin), surfaces the commenter as e.g.
+    /// <c>"💬 @coderabbitai[bot]"</c>. Returns empty when the body author
+    /// is the same as the PR creator (no need to repeat the same name).
+    /// </summary>
+    public string CommentAuthorBadge =>
+        !string.IsNullOrEmpty(BodyAuthorLogin)
+        && !string.Equals(BodyAuthorLogin, ActorLogin, StringComparison.Ordinal)
+            ? $"💬 @{BodyAuthorLogin}"
+            : string.Empty;
 
     /// <summary>
     /// Numeric local autoincrement id of the underlying notification_events
@@ -500,40 +515,47 @@ public partial class TimelineItemViewModel : ViewModelBase
                 preferComment = true;
             }
 
+            // The User column (ActorLogin) always represents the PR/Issue
+            // creator — i.e. who owns this thread. The body content is
+            // either the latest comment OR the description, but the User
+            // column does NOT switch to the commenter just because a row
+            // now shows a comment. The commenter is surfaced separately
+            // via BodyAuthorLogin in the detail pane header.
+            //
+            // We always fetch the subject (PR/Issue) once so legacy rows
+            // with a stale comment-author persisted as ActorLogin get
+            // corrected on selection. The extra request is one per click.
+            var subjectFetch = await _ctx.Api
+                .GetSubjectBodyAndAuthorAsync(pat, apiUrl, ct)
+                .ConfigureAwait(true);
+            var subjectAuthor = subjectFetch.AuthorLogin;
+
             string? content = null;
-            string? authorLogin = null;
+            string? bodyAuthor = null;
             if (preferComment && !string.IsNullOrEmpty(ThreadId))
             {
                 var details = await _ctx.Api
                     .GetLatestCommentDetailsAsync(pat, ThreadId, ct)
                     .ConfigureAwait(true);
                 content = details.Body;
-                authorLogin = details.AuthorLogin;
+                bodyAuthor = details.AuthorLogin;
             }
 
             if (string.IsNullOrEmpty(content))
             {
-                content = await _ctx.Api
-                    .GetSubjectBodyAsync(pat, apiUrl, ct)
-                    .ConfigureAwait(true);
-                // Subject (PR/Issue) author isn't surfaced here; leave
-                // BodyAuthorLogin null and the detail pane falls back to the
-                // repo owner header for non-comment content.
+                content = subjectFetch.Body;
+                bodyAuthor = subjectAuthor;
             }
 
             Body = StripHtmlComments(content);
-            BodyAuthorLogin = authorLogin;
+            BodyAuthorLogin = bodyAuthor;
 
-            // Persist the resolved actor login so the timeline's User column
-            // shows the real author/bot (e.g. @coderabbitai[bot]) instead of
-            // the repo owner stop-gap, both on the current row and on every
-            // sibling event for the same thread (so the next session and
-            // cold-cache rows remember it). We only write when the column is
-            // currently null and the fetch produced a non-empty login —
-            // never persist falsy data and never overwrite a value the user
-            // (or a previous fetch) already pinned.
-            if (!string.IsNullOrEmpty(authorLogin) && string.IsNullOrEmpty(ActorLogin))
+            // Persist the PR/Issue creator as the per-event ActorLogin.
+            // We overwrite when we have a fresh subjectAuthor so stale
+            // commenter values from earlier sessions are corrected.
+            if (!string.IsNullOrEmpty(subjectAuthor))
             {
+                var authorLogin = subjectAuthor;
                 ActorLogin = authorLogin;
 
                 if (_ctx.EventRepository is { } evRepo && EventLocalId is { } eventId)

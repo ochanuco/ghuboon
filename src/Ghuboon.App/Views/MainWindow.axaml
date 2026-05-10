@@ -122,8 +122,8 @@
                     Background="#04000000">
             <Grid DataContext="{Binding Timeline.SelectedItem}"
                   RowDefinitions="Auto,*,Auto">
-                <!-- Header: reason badge / repo / author / event id / relative time -->
-                <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto">
+                <!-- Header: reason badge / repo / PR creator / comment author / event id / relative time -->
+                <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,Auto,Auto,*,Auto,Auto">
                     <Border Grid.Column="0"
                             Padding="6,1"
                             CornerRadius="3"
@@ -144,9 +144,15 @@
                                FontWeight="SemiBold"
                                Opacity="0.85"
                                VerticalAlignment="Center"
-                               Text="{Binding BodyAuthorLogin, StringFormat='@{0}', FallbackValue=''}"
-                               IsVisible="{Binding BodyAuthorLogin, Converter={x:Static StringConverters.IsNotNullOrEmpty}, FallbackValue=False}" />
-                    <Button Grid.Column="4"
+                               Text="{Binding DisplayUserLogin, StringFormat='@{0}', FallbackValue=''}"
+                               IsVisible="{Binding DisplayUserLogin, Converter={x:Static StringConverters.IsNotNullOrEmpty}, FallbackValue=False}" />
+                    <TextBlock Grid.Column="3"
+                               Margin="8,0,0,0"
+                               Opacity="0.7"
+                               VerticalAlignment="Center"
+                               Text="{Binding CommentAuthorBadge, FallbackValue=''}"
+                               IsVisible="{Binding CommentAuthorBadge, Converter={x:Static StringConverters.IsNotNullOrEmpty}, FallbackValue=False}" />
+                    <Button Grid.Column="5"
                             Margin="8,0,0,0"
                             Padding="6,1"
                             FontSize="10"
@@ -160,7 +166,7 @@
                                    FontFamily="Menlo, Consolas, monospace"
                                    Opacity="0.75" />
                     </Button>
-                    <TextBlock Grid.Column="5"
+                    <TextBlock Grid.Column="6"
                                Margin="8,0,0,0"
                                Opacity="0.7"
                                FontSize="11"
