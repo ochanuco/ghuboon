@@ -32,4 +32,21 @@ public sealed record NotificationSubject(
     public bool IsCommentEvent =>
         !string.IsNullOrEmpty(LatestCommentApiUrl)
         && LatestCommentApiUrl.Contains("/comments/", StringComparison.Ordinal);
+
+    /// <summary>
+    /// What kind of GitHub object this row represents — Comment vs the
+    /// underlying PR/Issue/Discussion/... — derived from the snapshot.
+    /// See <see cref="NotificationEventKind"/> for the mapping rules.
+    /// </summary>
+    public NotificationEventKind Kind => IsCommentEvent
+        ? NotificationEventKind.Comment
+        : Type switch
+        {
+            "PullRequest" => NotificationEventKind.PullRequest,
+            "Issue" => NotificationEventKind.Issue,
+            "Discussion" => NotificationEventKind.Discussion,
+            "Commit" => NotificationEventKind.Commit,
+            "Release" => NotificationEventKind.Release,
+            _ => NotificationEventKind.Unknown,
+        };
 }

@@ -653,27 +653,35 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
     }
 
     /// <summary>
-    /// Best-effort actor lookup at sync time. Resolves the PR/Issue creator
-    /// (i.e. the thread owner), NOT the latest commenter. The User column
-    /// in the timeline represents "whose thread is this" — for self-authored
-    /// PRs that's @ochanuco regardless of whether @coderabbitai later
-    /// commented. The latest commenter is surfaced separately in the detail
-    /// pane via BodyAuthorLogin. Returns null on any failure — the row
-    /// falls back to lazy backfill on click.
+    /// Best-effort actor lookup at sync time, dispatched on
+    /// <see cref="NotificationSubject.Kind"/>:
+    ///   * Comment kind → fetch the commenter login via latest_comment_url.
+    ///   * PR / Issue / Discussion / etc. → fetch the subject creator via
+    ///     subject.url.
+    /// The actor in either case represents the person who PRODUCED this
+    /// row's content (commenter for comment rows, creator for PR rows),
+    /// so the timeline's User column attributes correctly per row.
+    /// Returns null on any failure — the row falls back to lazy backfill
+    /// on selection.
     /// </summary>
     private async Task<string?> ResolveActorLoginAsync(string pat, GitHubNotification notification, CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(notification.Subject.ApiUrl))
+        var subject = notification.Subject;
+        var url = subject.Kind == NotificationEventKind.Comment
+            ? subject.LatestCommentApiUrl
+            : subject.ApiUrl;
+
+        if (string.IsNullOrEmpty(url))
         {
             return null;
         }
 
         try
         {
-            var subj = await _apiClient
-                .GetSubjectBodyAndAuthorAsync(pat, notification.Subject.ApiUrl, ct)
+            var (_, login) = await _apiClient
+                .GetSubjectBodyAndAuthorAsync(pat, url, ct)
                 .ConfigureAwait(false);
-            return subj.AuthorLogin;
+            return login;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

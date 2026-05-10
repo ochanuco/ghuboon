@@ -215,7 +215,10 @@ public class TimelineItemViewModelTests
             webUrl: "https://github.com/octocat/hello/pull/1");
         await repo.UpsertAsync(notif, "{}", clockNow);
 
-        api.GetLatestCommentDetailsOverride = _ => ("LGTM", "coderabbitai[bot]");
+        // EventKind = Comment is selected by setting LatestCommentApiUrl to
+        // a /comments/ URL on the snapshot; EnsureBodyLoadedAsync then
+        // fetches via that URL and the override returns the commenter.
+        api.GetSubjectBodyAndAuthorOverride = _ => ("LGTM", "coderabbitai[bot]");
 
         // Use the just-assigned event id (FakeNotificationEventRepository
         // assigns an autoincrement). We need the event-backed VM constructor.
@@ -232,15 +235,17 @@ public class TimelineItemViewModelTests
             OnMarkRead: null,
             Log: null);
 
-        // Use a synthesized event with a Subject API URL so the body fetch
-        // path doesn't need the recovery network probe.
+        // Comment-kind event: subject.LatestCommentApiUrl points at a real
+        // /comments/{id} endpoint, so EnsureBodyLoadedAsync resolves the
+        // commenter (not the PR creator) for the User column.
         var withApiUrl = assigned with
         {
             Subject = new NotificationSubject(
                 "PullRequest",
                 assigned.Subject.Title,
                 "https://api.github.com/repos/octocat/hello/pulls/1",
-                assigned.Subject.WebUrl),
+                assigned.Subject.WebUrl,
+                LatestCommentApiUrl: "https://api.github.com/repos/octocat/hello/issues/comments/42"),
         };
 
         var vm = new TimelineItemViewModel(withApiUrl, ctx);

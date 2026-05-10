@@ -90,10 +90,10 @@
                                         Margin="6,0,0,0"
                                         Padding="6,1"
                                         CornerRadius="3"
-                                        Background="{Binding ReasonBadgeColor}"
+                                        Background="{Binding KindBadgeColor}"
                                         HorizontalAlignment="Left"
                                         VerticalAlignment="Center">
-                                    <TextBlock Text="{Binding ReasonBadgeText}"
+                                    <TextBlock Text="{Binding KindBadgeText}"
                                                Foreground="White"
                                                FontSize="10"
                                                FontWeight="SemiBold" />

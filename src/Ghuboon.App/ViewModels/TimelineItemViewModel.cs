@@ -140,6 +140,8 @@ public partial class TimelineItemViewModel : ViewModelBase
         SubjectType = source.Subject.Type;
         WebUrl = source.Subject.WebUrl;
         SubjectApiUrl = source.Subject.ApiUrl;
+        LatestCommentApiUrl = source.Subject.LatestCommentApiUrl;
+        EventKind = source.Subject.Kind;
         UpdatedAt = source.UpdatedAt;
         _unread = source.Unread;
         _actorLogin = source.ActorLogin;
@@ -173,6 +175,8 @@ public partial class TimelineItemViewModel : ViewModelBase
         SubjectType = source.Subject.Type;
         WebUrl = source.Subject.WebUrl;
         SubjectApiUrl = source.Subject.ApiUrl;
+        LatestCommentApiUrl = source.Subject.LatestCommentApiUrl;
+        EventKind = source.Subject.Kind;
         // Display the upstream updated_at for this observation: that is the
         // "when did this event happen" timestamp users expect on a per-row
         // event log (not when our sync wrote the row).
@@ -281,10 +285,29 @@ public partial class TimelineItemViewModel : ViewModelBase
     public string SubjectType { get; } = string.Empty;
     public string? WebUrl { get; }
     public string? SubjectApiUrl { get; }
+
+    /// <summary>
+    /// Snapshot of <c>subject.latest_comment_url</c> at the time this row
+    /// was observed. Drives the EventKind classification (Comment vs PR/
+    /// Issue/...) and the per-event actor / body fetch URL.
+    /// </summary>
+    public string? LatestCommentApiUrl { get; }
+
+    /// <summary>
+    /// What this row represents in GitHub terms (PR / Comment / Issue / ...).
+    /// Computed from <see cref="NotificationSubject.Kind"/> at construction.
+    /// Drives the kind badge and the actor / body resolution path.
+    /// </summary>
+    public NotificationEventKind EventKind { get; } = NotificationEventKind.Unknown;
+
     public DateTimeOffset UpdatedAt { get; }
 
     public string ReasonBadgeText => FormatReasonBadge(Reason);
     public string ReasonBadgeColor => GetBadgeColor(Reason);
+
+    /// <summary>"PR" / "COMMENT" / "ISSUE" / ... — primary type label.</summary>
+    public string KindBadgeText => FormatKindBadge(EventKind);
+    public string KindBadgeColor => GetKindColor(EventKind);
 
     /// <summary>"Just now" / "5m" / "2h" / "3d" / "5w" depending on age.</summary>
     public string RelativeTime => FormatRelative(_ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow, UpdatedAt);
@@ -489,73 +512,58 @@ public partial class TimelineItemViewModel : ViewModelBase
                 return;
             }
 
-            // Decide between latest-comment vs subject-description per row.
-            // For self-authored PRs, GitHub keeps reason=Author for every
-            // observation (PR creation, CI activity, your own comments) so
-            // we can't tell from Reason alone what triggered this event.
-            // Heuristic: if THIS event has the largest source_updated_at
-            // among all events for the thread, treat it as "the most recent
-            // observation" and prefer the latest-comment body. Earlier
-            // observations of the same thread fall back to the subject
-            // description so the user can still see what the PR is about.
-            var preferComment = false;
-            if (_ctx.EventRepository is { } eventRepo
-                && !string.IsNullOrEmpty(NotificationId))
+            // EventKind drives both the displayed body AND the actor:
+            //   * Comment kind  → fetch via latest_comment_url; actor =
+            //                     commenter, body = comment text.
+            //   * PR/Issue/...  → fetch via subject.url; actor = subject
+            //                     creator, body = description.
+            // The kind is computed at sync time from latest_comment_url, so
+            // each row carries the right classification without re-fetching.
+            // For legacy rows (latest_comment_url = NULL pre-Migration v6)
+            // the kind defaults to the subject type and we hit subject.url,
+            // matching the historical "show description" behavior.
+            string? targetUrl;
+            if (EventKind == NotificationEventKind.Comment
+                && !string.IsNullOrEmpty(LatestCommentApiUrl))
             {
-                var maxSrc = await eventRepo
-                    .GetMaxSourceUpdatedAtForThreadAsync(AccountId, NotificationId, ct)
-                    .ConfigureAwait(true);
-                preferComment = maxSrc.HasValue && maxSrc.Value <= UpdatedAt;
+                targetUrl = LatestCommentApiUrl;
             }
             else
             {
-                // No event repo wired (e.g., placeholder rows). Default to
-                // "latest comment if any" so static demos still surface the
-                // most useful content.
-                preferComment = true;
+                targetUrl = apiUrl;
             }
 
-            // The User column (ActorLogin) always represents the PR/Issue
-            // creator — i.e. who owns this thread. The body content is
-            // either the latest comment OR the description, but the User
-            // column does NOT switch to the commenter just because a row
-            // now shows a comment. The commenter is surfaced separately
-            // via BodyAuthorLogin in the detail pane header.
-            //
-            // We always fetch the subject (PR/Issue) once so legacy rows
-            // with a stale comment-author persisted as ActorLogin get
-            // corrected on selection. The extra request is one per click.
-            var subjectFetch = await _ctx.Api
-                .GetSubjectBodyAndAuthorAsync(pat, apiUrl, ct)
+            var fetched = await _ctx.Api
+                .GetSubjectBodyAndAuthorAsync(pat, targetUrl, ct)
                 .ConfigureAwait(true);
-            var subjectAuthor = subjectFetch.AuthorLogin;
 
-            string? content = null;
-            string? bodyAuthor = null;
-            if (preferComment && !string.IsNullOrEmpty(ThreadId))
+            // Comment events fall back to a thread-level latest-comment
+            // probe when the per-event /comments/{id} URL is missing
+            // (legacy rows lacked the snapshot). The thread metadata
+            // endpoint always returns SOMETHING current, which is the
+            // best we can do without per-event provenance.
+            var content = fetched.Body;
+            var bodyAuthor = fetched.AuthorLogin;
+            if (string.IsNullOrEmpty(content)
+                && EventKind == NotificationEventKind.Comment
+                && !string.IsNullOrEmpty(ThreadId))
             {
-                var details = await _ctx.Api
+                var probe = await _ctx.Api
                     .GetLatestCommentDetailsAsync(pat, ThreadId, ct)
                     .ConfigureAwait(true);
-                content = details.Body;
-                bodyAuthor = details.AuthorLogin;
-            }
-
-            if (string.IsNullOrEmpty(content))
-            {
-                content = subjectFetch.Body;
-                bodyAuthor = subjectAuthor;
+                content = probe.Body;
+                bodyAuthor = probe.AuthorLogin;
             }
 
             Body = StripHtmlComments(content);
             BodyAuthorLogin = bodyAuthor;
 
-            // Persist the PR/Issue creator as the per-event ActorLogin.
-            // We overwrite when we have a fresh subjectAuthor so stale
-            // commenter values from earlier sessions are corrected.
-            if (!string.IsNullOrEmpty(subjectAuthor))
+            // ActorLogin = the actor of THIS row's content (commenter for
+            // Comment kind, creator for PR/Issue kind). Always overwrite
+            // so stale values from earlier sessions get corrected.
+            if (!string.IsNullOrEmpty(bodyAuthor))
             {
-                var authorLogin = subjectAuthor;
+                var authorLogin = bodyAuthor;
                 ActorLogin = authorLogin;
 
                 if (_ctx.EventRepository is { } evRepo && EventLocalId is { } eventId)
@@ -818,6 +826,28 @@ public partial class TimelineItemViewModel : ViewModelBase
 
         return $"{(int)(delta.TotalDays / 7)}w";
     }
+
+    private static string FormatKindBadge(NotificationEventKind kind) => kind switch
+    {
+        NotificationEventKind.PullRequest => "PR",
+        NotificationEventKind.Issue => "ISSUE",
+        NotificationEventKind.Comment => "COMMENT",
+        NotificationEventKind.Discussion => "DISCUSSION",
+        NotificationEventKind.Commit => "COMMIT",
+        NotificationEventKind.Release => "RELEASE",
+        _ => "OTHER",
+    };
+
+    private static string GetKindColor(NotificationEventKind kind) => kind switch
+    {
+        NotificationEventKind.PullRequest => "#1A7F37",
+        NotificationEventKind.Issue => "#1F6FEB",
+        NotificationEventKind.Comment => "#6E7781",
+        NotificationEventKind.Discussion => "#A371F7",
+        NotificationEventKind.Commit => "#9A6700",
+        NotificationEventKind.Release => "#8250DF",
+        _ => "#6E7781",
+    };
 
     private static string FormatReasonBadge(NotificationReason reason) => reason switch
     {

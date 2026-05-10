@@ -19,7 +19,7 @@ public class MigrationRunnerTests
         // event-log timeline; v1 and v2 establish the rest of the schema and
         // FK constraints; v5 adds the actor_login columns used by the
         // detail-pane backfill. All five versions land on a fresh open.
-        Assert.Equal(new[] { 1, 2, 3, 4, 5 }, versions);
+        Assert.Equal(new[] { 1, 2, 3, 4, 5, 6 }, versions);
 
         var tableNames = (await connection.QueryAsync<string>(
                 "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"))
@@ -58,7 +58,7 @@ public class MigrationRunnerTests
                 "SELECT version FROM _schema_migrations ORDER BY version;"))
             .ToList();
 
-        Assert.Equal(new[] { 1, 2, 3, 4, 5 }, versions);
+        Assert.Equal(new[] { 1, 2, 3, 4, 5, 6 }, versions);
     }
 
     [Fact]
@@ -489,7 +489,7 @@ public class MigrationRunnerTests
         await using (var conn = await temp.RawFactory.OpenAsync())
         {
             var applied = await runner.RunAsync(conn);
-            Assert.Equal(new[] { 2, 3, 4, 5 }, applied.ToArray());
+            Assert.Equal(new[] { 2, 3, 4, 5, 6 }, applied.ToArray());
         }
 
         // Verify post-migration state.

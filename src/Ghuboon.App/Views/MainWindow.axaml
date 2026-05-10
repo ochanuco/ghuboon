@@ -122,14 +122,14 @@
                     Background="#04000000">
             <Grid DataContext="{Binding Timeline.SelectedItem}"
                   RowDefinitions="Auto,*,Auto">
-                <!-- Header: reason badge / repo / PR creator / comment author / event id / relative time -->
-                <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,Auto,Auto,*,Auto,Auto">
+                <!-- Header: kind badge / repo / actor / event id / relative time -->
+                <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto">
                     <Border Grid.Column="0"
                             Padding="6,1"
                             CornerRadius="3"
-                            Background="{Binding ReasonBadgeColor, FallbackValue=#22000000}"
-                            IsVisible="{Binding ReasonBadgeText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
-                        <TextBlock Text="{Binding ReasonBadgeText}"
+                            Background="{Binding KindBadgeColor, FallbackValue=#22000000}"
+                            IsVisible="{Binding KindBadgeText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <TextBlock Text="{Binding KindBadgeText}"
                                    Foreground="White"
                                    FontSize="10"
                                    FontWeight="SemiBold" />
@@ -146,13 +146,7 @@
                                VerticalAlignment="Center"
                                Text="{Binding DisplayUserLogin, StringFormat='@{0}', FallbackValue=''}"
                                IsVisible="{Binding DisplayUserLogin, Converter={x:Static StringConverters.IsNotNullOrEmpty}, FallbackValue=False}" />
-                    <TextBlock Grid.Column="3"
-                               Margin="8,0,0,0"
-                               Opacity="0.7"
-                               VerticalAlignment="Center"
-                               Text="{Binding CommentAuthorBadge, FallbackValue=''}"
-                               IsVisible="{Binding CommentAuthorBadge, Converter={x:Static StringConverters.IsNotNullOrEmpty}, FallbackValue=False}" />
-                    <Button Grid.Column="5"
+                    <Button Grid.Column="4"
                             Margin="8,0,0,0"
                             Padding="6,1"
                             FontSize="10"
@@ -166,7 +160,7 @@
                                    FontFamily="Menlo, Consolas, monospace"
                                    Opacity="0.75" />
                     </Button>
-                    <TextBlock Grid.Column="6"
+                    <TextBlock Grid.Column="5"
                                Margin="8,0,0,0"
                                Opacity="0.7"
                                FontSize="11"
