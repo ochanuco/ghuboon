@@ -116,12 +116,16 @@ public class NotificationsSettingsViewModelTests
         // Trigger the persist failure path off the captured context. The
         // continuation should be scheduled back onto sc so PropertyChanged
         // events fire there.
-        var threadOnPropertyChanged = -1;
+        //
+        // Issue #45: capture the actual managed thread id the PropertyChanged
+        // handler ran on (a sentinel of int.MinValue lets us assert the
+        // handler fired without colliding with any real ManagedThreadId).
+        var threadOnPropertyChanged = int.MinValue;
         vm.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName == nameof(vm.PersistErrorMessage))
             {
-                threadOnPropertyChanged = sc.PostThreadIdsObserved.Count;
+                threadOnPropertyChanged = Thread.CurrentThread.ManagedThreadId;
             }
         };
 
@@ -137,6 +141,11 @@ public class NotificationsSettingsViewModelTests
 
         Assert.True(vm.HasPersistError, "Expected the persist error to be observed.");
         Assert.True(sc.PostCount > 0, "Continuation should have been Post'd to the captured context.");
+        Assert.NotEqual(int.MinValue, threadOnPropertyChanged);
+        // PropertyChanged for PersistErrorMessage must fire on the same
+        // thread the captured SynchronizationContext pumped on — that is the
+        // whole point of capturing SynchronizationContext.Current.
+        Assert.Equal(sc.PostThreadIdsObserved.Single(), threadOnPropertyChanged);
     }
 
     private sealed class RecordingSynchronizationContext : SynchronizationContext
