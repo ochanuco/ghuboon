@@ -56,6 +56,41 @@ public class MigrationRunnerTests
     }
 
     [Fact]
+    public void Constructor_throws_when_migrations_share_version()
+    {
+        // Issue #12: duplicate Version values would silently shadow each other,
+        // so the runner must refuse to construct. The exception message names
+        // the offending versions to make diagnosis trivial.
+        var migrations = new[]
+        {
+            new Migration(1, "first", "CREATE TABLE a (id INTEGER);"),
+            new Migration(1, "second", "CREATE TABLE b (id INTEGER);"),
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            new MigrationRunner(migrations));
+        Assert.Contains("1", ex.Message);
+    }
+
+    [Fact]
+    public void Constructor_lists_all_duplicate_versions()
+    {
+        var migrations = new[]
+        {
+            new Migration(1, "a", "SELECT 1;"),
+            new Migration(2, "b", "SELECT 1;"),
+            new Migration(2, "b2", "SELECT 1;"),
+            new Migration(3, "c", "SELECT 1;"),
+            new Migration(3, "c2", "SELECT 1;"),
+        };
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            new MigrationRunner(migrations));
+        Assert.Contains("2", ex.Message);
+        Assert.Contains("3", ex.Message);
+    }
+
+    [Fact]
     public async Task Encryption_key_is_persisted_to_credential_store()
     {
         await using var temp = new TempDatabase();

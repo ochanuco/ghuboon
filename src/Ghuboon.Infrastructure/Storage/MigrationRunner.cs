@@ -18,7 +18,25 @@ public sealed class MigrationRunner
 
     internal MigrationRunner(IReadOnlyList<Migration> migrations)
     {
-        _migrations = migrations.OrderBy(m => m.Version).ToList();
+        ArgumentNullException.ThrowIfNull(migrations);
+
+        var sorted = migrations.OrderBy(m => m.Version).ToList();
+
+        // Issue #12: fail fast at construction if two migrations claim the same
+        // Version. Otherwise the runner could silently apply only one of them
+        // (whichever comes first) and leave the schema half-baked.
+        var duplicates = sorted
+            .GroupBy(m => m.Version)
+            .Where(g => g.Count() > 1)
+            .Select(g => g.Key)
+            .ToList();
+        if (duplicates.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Duplicate migration version(s): {string.Join(", ", duplicates)}");
+        }
+
+        _migrations = sorted;
     }
 
     /// <summary>
