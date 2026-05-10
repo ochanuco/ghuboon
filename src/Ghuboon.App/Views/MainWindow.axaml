@@ -58,7 +58,7 @@
                          Text="{Binding SearchText}" />
 
                 <Button Grid.Column="5"
-                        Content="Settings"
+                        Content="{Binding SettingsToggleLabel}"
                         Command="{Binding OpenSettingsCommand}" />
             </Grid>
         </Border>

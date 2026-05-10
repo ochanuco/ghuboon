@@ -45,6 +45,7 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
     private string _searchText = string.Empty;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SettingsToggleLabel))]
     private bool _isSettingsVisible;
 
     [ObservableProperty]
@@ -228,8 +229,10 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
     [RelayCommand]
     private void OpenSettings()
     {
-        IsSettingsVisible = true;
+        IsSettingsVisible = !IsSettingsVisible;
     }
+
+    public string SettingsToggleLabel => IsSettingsVisible ? "Done" : "Settings";
 
     [RelayCommand]
     private void CloseSettings()
