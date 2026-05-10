@@ -95,14 +95,26 @@ public sealed class MacOSDesktopNotificationService : IDesktopNotificationServic
     }
 
     /// <summary>
+    /// Built-in macOS notification sound played when a banner appears.
+    /// Resolved against <c>/System/Library/Sounds/&lt;name&gt;.aiff</c> by
+    /// AppleScript; "Glass" is the default macOS notification chime and
+    /// is available on every macOS install we target.
+    /// </summary>
+    internal const string DefaultSoundName = "Glass";
+
+    /// <summary>
     /// Builds the AppleScript expression passed to <c>osascript -e</c>. Both the
     /// title and body strings are escaped via <see cref="EscapeForAppleScript"/>.
+    /// A <c>sound name</c> clause is appended so the banner is announced
+    /// audibly — without it, AppleScript notifications are silent regardless
+    /// of the user's macOS notification settings.
     /// </summary>
-    internal static string BuildAppleScript(string title, string body)
+    internal static string BuildAppleScript(string title, string body, string soundName = DefaultSoundName)
     {
         var safeTitle = EscapeForAppleScript(title ?? string.Empty);
         var safeBody = EscapeForAppleScript(body ?? string.Empty);
-        return $"display notification \"{safeBody}\" with title \"{safeTitle}\"";
+        var safeSound = EscapeForAppleScript(soundName ?? DefaultSoundName);
+        return $"display notification \"{safeBody}\" with title \"{safeTitle}\" sound name \"{safeSound}\"";
     }
 
     /// <summary>

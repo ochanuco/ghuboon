@@ -15,24 +15,44 @@ namespace Ghuboon.Infrastructure.Sync;
 /// (ADR-022, 30 days), and high-priority new-item eventing (ADR-021).
 /// </para>
 /// <para>
-/// Background loop fires every <see cref="DefaultPeriod"/> (5 minutes per ADR-020).
+/// Background loop fires every <see cref="DefaultPeriod"/> (60 seconds —
+/// GitHub's recommended floor for etag-conditional polling).
 /// Tests may override the period via the constructor for fast iteration.
 /// </para>
 /// </summary>
 public sealed class NotificationSyncService : INotificationSyncService, IAsyncDisposable, IDisposable
 {
-    /// <summary>Default 5-minute periodic sync interval (ADR-020).</summary>
-    public static readonly TimeSpan DefaultPeriod = TimeSpan.FromMinutes(5);
+    /// <summary>
+    /// Default 60-second periodic sync interval. GitHub's
+    /// <c>X-Poll-Interval</c> header guidance for the notifications
+    /// endpoint is 60 seconds, and conditional requests that 304 don't
+    /// count against the rate-limit budget — so we can poll at the
+    /// recommended floor without burning quota. Earlier 5-minute
+    /// interval (ADR-020) added 2-3 minute perceived lag on every new
+    /// event; reverting to the GitHub-recommended cadence trades that
+    /// lag for cheap conditional GETs.
+    /// </summary>
+    public static readonly TimeSpan DefaultPeriod = TimeSpan.FromSeconds(60);
 
     /// <summary>30-day cache retention (ADR-022).</summary>
     public static readonly TimeSpan CacheRetention = TimeSpan.FromDays(30);
 
+    // Reasons that emit a NewNotifications event for the OS-banner pipeline.
+    // Must stay aligned with HighPriorityNotificationGate's allow-list — when
+    // they drift, sync drops events on the floor before the gate ever sees
+    // them, which is exactly how a previous regression silenced
+    // MyPr/State/Comment banners. The gate is the final filter; this set
+    // exists only as an upstream cost-cut so we don't fire the event at all
+    // for low-signal reasons (Watching, CiActivity, ...).
     private static readonly HashSet<NotificationReason> HighPriorityReasons = new()
     {
         NotificationReason.Review,
         NotificationReason.Mention,
         NotificationReason.TeamMention,
         NotificationReason.Assigned,
+        NotificationReason.MyPr,
+        NotificationReason.State,
+        NotificationReason.Comment,
     };
 
     private static readonly JsonSerializerOptions RawJsonOptions = new()
@@ -167,8 +187,6 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
             RaiseProgress(accountId, SyncStage.Failed, dbResult);
             return dbResult;
         }
-
-        var hadPriorEtag = !string.IsNullOrEmpty(state.NotificationsEtag);
 
         // 4. Call GitHub API.
         RaiseProgress(accountId, SyncStage.Fetching, null);
@@ -455,10 +473,17 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
             Message: null,
             RateLimit: response.RateLimit);
 
-        RaiseProgress(accountId, SyncStage.Completed, result2);
-
-        // 9. NewNotifications event — only when we already had a prior etag (ADR-021).
-        if (hadPriorEtag && highPriorityNew.Count > 0)
+        // 9. NewNotifications event — fire BEFORE Progress.Completed so the
+        // OS banner is dispatched alongside the timeline reload rather than
+        // racing it. ADR-021's hadPriorEtag gate is removed: the
+        // HighPriorityNotificationGate now dedups per-event via
+        // last_notified_at vs candidate.UpdatedAt, so the "first sync after
+        // a reset spams every cached thread" scenario is already handled
+        // (legacy rows have last_notified_at set from prior sessions and
+        // are suppressed; only genuinely new events fire). The hadPriorEtag
+        // gate added a 1–2 minute lag where the TL had the row but the
+        // banner waited for the NEXT sync that brought a fresh event.
+        if (highPriorityNew.Count > 0)
         {
             try
             {
@@ -469,6 +494,8 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 _logger?.Warning(ex, "NewNotifications subscriber threw");
             }
         }
+
+        RaiseProgress(accountId, SyncStage.Completed, result2);
 
         return result2;
     }
