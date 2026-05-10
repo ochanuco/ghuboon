@@ -27,8 +27,6 @@ public class HighPriorityNotificationGateTests
 
     [Theory]
     [InlineData(NotificationReason.Comment)]
-    [InlineData(NotificationReason.MyPr)]
-    [InlineData(NotificationReason.State)]
     [InlineData(NotificationReason.Watching)]
     [InlineData(NotificationReason.Manual)]
     [InlineData(NotificationReason.Invitation)]
@@ -51,6 +49,8 @@ public class HighPriorityNotificationGateTests
     [InlineData(NotificationReason.Mention)]
     [InlineData(NotificationReason.TeamMention)]
     [InlineData(NotificationReason.Assigned)]
+    [InlineData(NotificationReason.MyPr)]
+    [InlineData(NotificationReason.State)]
     public async Task FilterAsync_accepts_high_priority_reason_on_first_pass(NotificationReason reason)
     {
         await using var temp = new TempDatabase();
