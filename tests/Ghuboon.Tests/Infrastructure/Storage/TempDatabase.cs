@@ -42,11 +42,31 @@ internal sealed class TempDatabase : IDisposable, IAsyncDisposable
     /// caller supplies, without first upserting them as full notifications.
     /// To keep that out-of-scope flow honest under the new FK
     /// (<c>fk_notification_local_states_notification</c>), seed the IDs
-    /// those tests use (<c>n1..n4</c>) tied to <c>acct-1</c>.
+    /// those tests use, tied to <c>acct-1</c>.
+    ///
+    /// Two flavours of IDs are seeded:
+    /// <list type="bullet">
+    ///   <item><description>
+    ///     Full <c>{accountId}:{threadId}</c> form (Lane N's
+    ///     <see cref="GitHubNotification"/> invariant) used by
+    ///     <c>HighPriorityNotificationGateTests</c> and any flow that goes
+    ///     through the gate. The gate writes <c>candidate.Id</c>, which is
+    ///     <c>{accountId}:{threadId}</c>, into
+    ///     <c>notification_local_states.notification_id</c>.
+    ///   </description></item>
+    ///   <item><description>
+    ///     Bare IDs (<c>n-1</c>, <c>n-2</c>, ...) that
+    ///     <c>LastNotifiedTrackerTests</c> writes directly through the
+    ///     internal tracker API, bypassing the gate's id construction.
+    ///   </description></item>
+    /// </list>
     /// </summary>
     private static readonly IReadOnlyList<string> DefaultSeedNotificationIds = new[]
     {
-        "n1", "n2", "n3", "n4",
+        // Gate tests: full {accountId}:{threadId} form (Lane N invariant).
+        "acct-1:n1", "acct-1:n2", "acct-1:n3", "acct-1:n4",
+        // Tracker tests: bare IDs the tracker is exercised against directly.
+        "n-1", "n-2", "n-3", "n-race", "n-existing", "n-bad",
     };
 
     private readonly SqliteConnectionFactory _inner;

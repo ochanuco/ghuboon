@@ -368,41 +368,16 @@ public class NotificationSyncServiceTests
         Assert.Equal("hello", name);
     }
 
-    [Fact]
-    public async Task SyncAsync_SkipsNotificationWithMalformedRepositoryFullName()
-    {
-        // Issue #16: a single notification carrying a malformed repository_full_name
-        // (e.g. drift before issue #6 invariants land) must not abort the entire sync.
-        // The notification itself is still upserted (notifications carry their own
-        // primary key), but the repository upsert is skipped + logged.
-        var h = new Harness();
-        await h.SeedAccountAndPatAsync();
-
-        var good = BuildNotification("good", repo: "octo/hello");
-        var bad = BuildNotification("bad", repo: "missing-slash");
-
-        h.Api.EnqueueList(new NotificationsResponse(
-            new[] { good, bad },
-            "\"e1\"",
-            RateLimitInfo.Empty,
-            NotModified: false));
-
-        var service = h.BuildService();
-        var result = await service.SyncAsync(AccountId);
-
-        // Sync overall succeeds — partial failures must not poison cached data.
-        Assert.True(result.Success);
-        Assert.Equal(2, result.FetchedCount);
-
-        // Both notifications are persisted in the cache.
-        Assert.Equal(2, h.Notifications.Count);
-
-        // Only the well-formed repository is upserted; the malformed one is skipped.
-        Assert.Equal(1, h.Repositories.UpsertCallCount);
-        var repos = await h.Repositories.ListByAccountAsync(AccountId);
-        Assert.Single(repos);
-        Assert.Equal("octo/hello", repos[0].FullName);
-    }
+    // Note: a former integration test
+    // (SyncAsync_SkipsNotificationWithMalformedRepositoryFullName) was removed
+    // as part of Wave 6 integration. After Lane N (issue #6) hardened
+    // GitHubNotification's invariants to require RepositoryFullName to be
+    // exactly "owner/name" with both sides non-empty, it is impossible to
+    // construct a GitHubNotification carrying a malformed repository name in a
+    // test, so the integration scenario is no longer reachable from in-process
+    // fakes. The malformed-repo skip path in NotificationSyncService remains
+    // as defence-in-depth for upstream drift, and SplitFullName's behaviour is
+    // covered directly by the unit tests above.
 
     [Fact]
     public async Task SyncAsync_RepositoryUpsertedOncePerUniqueRepo()
