@@ -54,4 +54,19 @@ internal sealed class FakeGitHubApiClient : IGitHubApiClient
         MarkedReadThreads.Add(threadId);
         return Task.CompletedTask;
     }
+
+    public Task<string?> GetSubjectBodyAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+        => Task.FromResult<string?>(null);
+
+    public Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default)
+        => Task.FromResult<string?>(null);
+
+    public Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default)
+        => Task.FromResult<string?>(null);
+
+    public Task<(string? Body, string? AuthorLogin)> GetLatestCommentDetailsAsync(string pat, string threadId, CancellationToken ct = default)
+        => Task.FromResult<(string?, string?)>((null, null));
+
+    public Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndAuthorAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+        => Task.FromResult<(string?, string?)>((null, null));
 }

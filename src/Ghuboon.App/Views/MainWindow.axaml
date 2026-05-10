@@ -2,6 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:Ghuboon.App.ViewModels"
         xmlns:views="using:Ghuboon.App.Views"
+        xmlns:md="clr-namespace:Markdown.Avalonia;assembly=Markdown.Avalonia"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d" d:DesignWidth="900" d:DesignHeight="600"
@@ -9,13 +10,20 @@
         x:DataType="vm:MainWindowViewModel"
         Icon="/Assets/avalonia-logo.ico"
         Title="Ghuboon"
-        Width="900" Height="600">
+        Width="980" Height="900">
 
     <Design.DataContext>
         <vm:MainWindowViewModel/>
     </Design.DataContext>
 
-    <Grid RowDefinitions="Auto,Auto,*,Auto">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />                  <!-- 0 top bar -->
+            <RowDefinition Height="2*" MinHeight="120" />     <!-- 1 timeline -->
+            <RowDefinition Height="Auto" />                  <!-- 2 splitter -->
+            <RowDefinition Height="3*" MinHeight="240" />     <!-- 3 tabs+detail block -->
+            <RowDefinition Height="Auto" />                  <!-- 4 status -->
+        </Grid.RowDefinitions>
 
         <!-- Top bar -->
         <Border Grid.Row="0" Padding="12,8" BorderThickness="0,0,0,1" BorderBrush="#33000000">
@@ -63,36 +71,172 @@
             </Grid>
         </Border>
 
-        <!-- Tabs -->
-        <ListBox Grid.Row="1"
-                 ItemsSource="{Binding Tabs}"
-                 SelectedItem="{Binding SelectedTab}"
-                 Padding="8,4"
-                 BorderThickness="0,0,0,1"
-                 BorderBrush="#22000000"
-                 Background="Transparent">
-            <ListBox.ItemsPanel>
-                <ItemsPanelTemplate>
-                    <StackPanel Orientation="Horizontal" Spacing="4" />
-                </ItemsPanelTemplate>
-            </ListBox.ItemsPanel>
-            <ListBox.ItemTemplate>
-                <DataTemplate>
-                    <TextBlock Text="{Binding}" Padding="10,4" />
-                </DataTemplate>
-            </ListBox.ItemTemplate>
-        </ListBox>
-
-        <!-- Body: timeline or settings -->
-        <Panel Grid.Row="2">
+        <!-- Body: timeline (or full-window settings) -->
+        <Panel Grid.Row="1">
             <ContentControl IsVisible="{Binding !IsSettingsVisible}"
                             Content="{Binding Timeline}" />
-            <ContentControl IsVisible="{Binding IsSettingsVisible}"
-                            Content="{Binding Settings}" />
         </Panel>
 
+        <!-- Splitter between timeline and the tabs+detail block. Dragging
+             this resizes the timeline / detail split; the tab bar inside the
+             bottom block stays Auto-height so it doesn't get squished. -->
+        <GridSplitter Grid.Row="2"
+                      Height="4"
+                      HorizontalAlignment="Stretch"
+                      ResizeDirection="Rows"
+                      Background="#11000000"
+                      IsVisible="{Binding !IsSettingsVisible}" />
+
+        <!-- Tabs + detail. Tabs Auto on top; detail fills the remaining
+             star-sized space inside this row. -->
+        <Grid Grid.Row="3"
+              IsVisible="{Binding !IsSettingsVisible}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />   <!-- tabs -->
+                <RowDefinition Height="*" />       <!-- detail -->
+            </Grid.RowDefinitions>
+
+            <ListBox Grid.Row="0"
+                     ItemsSource="{Binding Tabs}"
+                     SelectedItem="{Binding SelectedTab}"
+                     Padding="8,4"
+                     BorderThickness="0,1,0,0"
+                     BorderBrush="#22000000"
+                     Background="Transparent">
+                <ListBox.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal" Spacing="4" />
+                    </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding}" Padding="10,4" />
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+
+            <Border Grid.Row="1"
+                    Padding="10,8"
+                    BorderThickness="0,1,0,0"
+                    BorderBrush="#22000000"
+                    Background="#04000000">
+            <Grid DataContext="{Binding Timeline.SelectedItem}"
+                  RowDefinitions="Auto,*,Auto">
+                <!-- Header: kind badge / repo / actor / event id / relative time -->
+                <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,Auto,*,Auto,Auto">
+                    <Border Grid.Column="0"
+                            Padding="6,1"
+                            CornerRadius="3"
+                            Background="{Binding KindBadgeColor, FallbackValue=#22000000}"
+                            IsVisible="{Binding KindBadgeText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                        <TextBlock Text="{Binding KindBadgeText}"
+                                   Foreground="White"
+                                   FontSize="10"
+                                   FontWeight="SemiBold" />
+                    </Border>
+                    <TextBlock Grid.Column="1"
+                               Margin="8,0,0,0"
+                               FontWeight="SemiBold"
+                               VerticalAlignment="Center"
+                               Text="{Binding RepositoryFullName, FallbackValue=''}" />
+                    <TextBlock Grid.Column="2"
+                               Margin="8,0,0,0"
+                               FontWeight="SemiBold"
+                               Opacity="0.85"
+                               VerticalAlignment="Center"
+                               Text="{Binding DisplayUserLogin, StringFormat='@{0}', FallbackValue=''}"
+                               IsVisible="{Binding DisplayUserLogin, Converter={x:Static StringConverters.IsNotNullOrEmpty}, FallbackValue=False}" />
+                    <Button Grid.Column="4"
+                            Margin="8,0,0,0"
+                            Padding="6,1"
+                            FontSize="10"
+                            Background="Transparent"
+                            BorderThickness="1"
+                            BorderBrush="#33000000"
+                            Command="{Binding CopyEventIdCommand}"
+                            ToolTip.Tip="Copy event id to clipboard"
+                            IsVisible="{Binding EventLocalId, Converter={x:Static ObjectConverters.IsNotNull}, FallbackValue=False}">
+                        <TextBlock Text="{Binding EventLocalId, StringFormat='id #{0}'}"
+                                   FontFamily="Menlo, Consolas, monospace"
+                                   Opacity="0.75" />
+                    </Button>
+                    <TextBlock Grid.Column="5"
+                               Margin="8,0,0,0"
+                               Opacity="0.7"
+                               FontSize="11"
+                               VerticalAlignment="Center"
+                               Text="{Binding RelativeTime, FallbackValue=''}" />
+                </Grid>
+
+                <!-- Title + Markdown-rendered body. Markdown.Avalonia's
+                     MarkdownScrollViewer owns its own ScrollViewer so we
+                     stack title + status above it via a DockPanel. -->
+                <DockPanel Grid.Row="1" Margin="0,4,0,4" LastChildFill="True">
+                    <TextBlock DockPanel.Dock="Top"
+                               Text="{Binding Title, FallbackValue='Select a row to see details.'}"
+                               FontSize="13"
+                               FontWeight="SemiBold"
+                               TextWrapping="Wrap" />
+                    <TextBlock DockPanel.Dock="Top"
+                               Text="Loading description…"
+                               Margin="0,4,0,0"
+                               FontSize="12"
+                               Opacity="0.6"
+                               FontStyle="Italic"
+                               IsVisible="{Binding IsLoadingBody, FallbackValue=False}" />
+                    <TextBlock DockPanel.Dock="Top"
+                               Text="(no description / unsupported subject)"
+                               Margin="0,4,0,0"
+                               FontSize="12"
+                               Opacity="0.5"
+                               FontStyle="Italic"
+                               IsVisible="{Binding HasNoBodyAfterLoad, FallbackValue=False}" />
+                    <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+                                  VerticalScrollBarVisibility="Auto"
+                                  IsVisible="{Binding Body, Converter={x:Static StringConverters.IsNotNullOrEmpty}, FallbackValue=False}">
+                        <ItemsControl ItemsSource="{Binding BodyBlocks}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="vm:BodyBlock">
+                                    <Panel>
+                                        <!-- plain markdown block -->
+                                        <md:MarkdownScrollViewer Markdown="{Binding Markdown}"
+                                                                 IsVisible="{Binding Kind, Converter={x:Static vm:BodyBlockKindConverters.IsMarkdown}}" />
+                                        <!-- collapsible <details> block -->
+                                        <Expander Header="{Binding Summary}"
+                                                  IsExpanded="False"
+                                                  Margin="0,4,0,4"
+                                                  IsVisible="{Binding Kind, Converter={x:Static vm:BodyBlockKindConverters.IsDetails}}">
+                                            <md:MarkdownScrollViewer Markdown="{Binding Markdown}" />
+                                        </Expander>
+                                    </Panel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </DockPanel>
+
+                <!-- Bottom-right action buttons -->
+                <StackPanel Grid.Row="2"
+                            Orientation="Horizontal"
+                            Spacing="6"
+                            HorizontalAlignment="Right"
+                            IsVisible="{Binding NotificationId, Converter={x:Static StringConverters.IsNotNullOrEmpty}, FallbackValue=False}">
+                    <Button Content="Open in GitHub"
+                            Command="{Binding OpenInGitHubCommand}"
+                            Padding="8,2" />
+                    <Button Content="Mark as read"
+                            Command="{Binding MarkAsReadCommand}"
+                            Padding="8,2" />
+                    <Button Content="Copy URL"
+                            Command="{Binding CopyUrlCommand}"
+                            Padding="8,2" />
+                </StackPanel>
+            </Grid>
+            </Border>
+        </Grid>
+
         <!-- Status bar (Phase 14) -->
-        <Border Grid.Row="3"
+        <Border Grid.Row="4"
                 Padding="10,4"
                 BorderThickness="0,1,0,0"
                 BorderBrush="#22000000"
@@ -151,5 +295,10 @@
                 </StackPanel>
             </Grid>
         </Border>
+
+        <!-- Settings full-window overlay -->
+        <ContentControl Grid.Row="1" Grid.RowSpan="3"
+                        IsVisible="{Binding IsSettingsVisible}"
+                        Content="{Binding Settings}" />
     </Grid>
 </Window>

@@ -23,6 +23,12 @@ namespace Ghuboon.Core.Domain;
 /// <param name="Unread">Whether the thread was unread for the user at observation time.</param>
 /// <param name="LastReadAt">Last time the user marked it read locally; null when never read.</param>
 /// <param name="RawJson">Raw GitHub payload snapshot (may be a synthesized minimal payload for MVP).</param>
+/// <param name="ActorLogin">
+/// Optional GitHub login of the user/bot whose action produced this event
+/// (e.g. <c>"coderabbitai[bot]"</c>). The notifications listing API does not
+/// include this field, so it is lazily back-filled from per-thread fetches
+/// and may be null for legacy rows.
+/// </param>
 /// <exception cref="ArgumentNullException">
 /// Thrown when any of <paramref name="AccountId"/>, <paramref name="NotificationId"/>,
 /// <paramref name="ThreadId"/>, <paramref name="RepositoryFullName"/>,
@@ -48,7 +54,8 @@ public sealed record NotificationEvent
         DateTimeOffset ObservedAt,
         bool Unread,
         DateTimeOffset? LastReadAt,
-        string RawJson)
+        string RawJson,
+        string? ActorLogin = null)
     {
         ArgumentNullException.ThrowIfNull(AccountId);
         ArgumentNullException.ThrowIfNull(NotificationId);
@@ -123,6 +130,7 @@ public sealed record NotificationEvent
         this.Unread = Unread;
         this.LastReadAt = LastReadAt;
         this.RawJson = RawJson;
+        this.ActorLogin = ActorLogin;
     }
 
     // Identity-bearing fields are private init to mirror GitHubNotification:
@@ -142,4 +150,12 @@ public sealed record NotificationEvent
     public bool Unread { get; init; }
     public DateTimeOffset? LastReadAt { get; init; }
     public string RawJson { get; init; }
+    /// <summary>
+    /// Optional login of the actor whose action produced this event. The
+    /// notifications listing API does not surface this, so it is lazily
+    /// populated when the user selects the row (per-thread comment fetch)
+    /// and persisted back so subsequent sessions remember the real
+    /// author/bot rather than the repo owner stop-gap.
+    /// </summary>
+    public string? ActorLogin { get; init; }
 }

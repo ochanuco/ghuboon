@@ -53,6 +53,14 @@ internal sealed class FakeNotificationRepository : INotificationRepository
     {
         return Task.FromResult(0);
     }
+
+    public Task<int> SetActorLoginAsync(string id, string actorLogin, CancellationToken ct = default)
+    {
+        var idx = Notifications.FindIndex(n => n.Id == id);
+        if (idx < 0) return Task.FromResult(0);
+        Notifications[idx] = Notifications[idx] with { ActorLogin = actorLogin };
+        return Task.FromResult(1);
+    }
 }
 
 /// <summary>
@@ -97,11 +105,19 @@ internal sealed class FakeNotificationEventRepository : INotificationEventReposi
 
     public Task<IReadOnlyList<NotificationEvent>> ListByAccountAsync(string accountId, int limit, CancellationToken ct = default)
     {
-        IReadOnlyList<NotificationEvent> list = Events
+        // Tween-like timeline: cap to the latest N events by observed_at
+        // (when WE saw them) but return them ordered by source_updated_at
+        // (when GitHub last touched the thread) so the displayed order
+        // matches the "Updated" column the UI surfaces.
+        var newest = Events
             .Where(e => e.AccountId == accountId)
             .OrderByDescending(e => e.ObservedAt)
             .ThenByDescending(e => e.Id)
             .Take(limit)
+            .ToList();
+        IReadOnlyList<NotificationEvent> list = newest
+            .OrderBy(e => e.SourceUpdatedAt)
+            .ThenBy(e => e.Id)
             .ToList();
         return Task.FromResult(list);
     }
@@ -126,6 +142,29 @@ internal sealed class FakeNotificationEventRepository : INotificationEventReposi
     {
         var removed = Events.RemoveAll(e => e.ObservedAt < cutoff);
         return Task.FromResult(removed);
+    }
+
+    public Task<DateTimeOffset?> GetMaxSourceUpdatedAtForThreadAsync(string accountId, string notificationId, CancellationToken ct = default)
+    {
+        var max = Events
+            .Where(e => e.AccountId == accountId && e.NotificationId == notificationId)
+            .Select(e => (DateTimeOffset?)e.SourceUpdatedAt)
+            .DefaultIfEmpty()
+            .Max();
+        return Task.FromResult(max);
+    }
+
+    public Task<int> SetActorLoginAsync(long eventId, string actorLogin, CancellationToken ct = default)
+    {
+        for (var i = 0; i < Events.Count; i++)
+        {
+            if (Events[i].Id == eventId)
+            {
+                Events[i] = Events[i] with { ActorLogin = actorLogin };
+                return Task.FromResult(1);
+            }
+        }
+        return Task.FromResult(0);
     }
 }
 
@@ -209,6 +248,31 @@ internal sealed class FakeApiClient : IGitHubApiClient
         }
         MarkedReadThreads.Add(threadId);
     }
+
+    public Func<string, string?>? GetSubjectBodyOverride { get; set; }
+
+    public Task<string?> GetSubjectBodyAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+        => Task.FromResult(GetSubjectBodyOverride?.Invoke(subjectApiUrl));
+
+    public Func<string, string?>? GetThreadSubjectUrlOverride { get; set; }
+
+    public Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default)
+        => Task.FromResult(GetThreadSubjectUrlOverride?.Invoke(threadId));
+
+    public Func<string, string?>? GetLatestCommentBodyOverride { get; set; }
+
+    public Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default)
+        => Task.FromResult(GetLatestCommentBodyOverride?.Invoke(threadId));
+
+    public Func<string, (string?, string?)>? GetLatestCommentDetailsOverride { get; set; }
+
+    public Task<(string? Body, string? AuthorLogin)> GetLatestCommentDetailsAsync(string pat, string threadId, CancellationToken ct = default)
+        => Task.FromResult(GetLatestCommentDetailsOverride?.Invoke(threadId) ?? (null, null));
+
+    public Func<string, (string?, string?)>? GetSubjectBodyAndAuthorOverride { get; set; }
+
+    public Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndAuthorAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+        => Task.FromResult(GetSubjectBodyAndAuthorOverride?.Invoke(subjectApiUrl) ?? (null, null));
 }
 
 internal sealed class FakeBrowser : IBrowserService

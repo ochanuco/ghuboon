@@ -22,6 +22,8 @@ internal sealed class NotificationEventRow
     public long Unread { get; set; }
     public string? LastReadAt { get; set; }
     public string RawJson { get; set; } = string.Empty;
+    public string? ActorLogin { get; set; }
+    public string? LatestCommentUrl { get; set; }
 }
 
 /// <summary>
@@ -57,12 +59,12 @@ public sealed class NotificationEventRepository : INotificationEventRepository
                                account_id, notification_id, thread_id, repository_full_name,
                                subject_type, subject_title, subject_api_url, web_url,
                                reason, source_updated_at, observed_at,
-                               unread, last_read_at, raw_json)
+                               unread, last_read_at, raw_json, actor_login, latest_comment_url)
                            VALUES (
                                @accountId, @notificationId, @threadId, @repositoryFullName,
                                @subjectType, @subjectTitle, @subjectApiUrl, @webUrl,
                                @reason, @sourceUpdatedAt, @observedAt,
-                               @unread, @lastReadAt, @rawJson)
+                               @unread, @lastReadAt, @rawJson, @actorLogin, @latestCommentUrl)
                            ON CONFLICT (account_id, notification_id, source_updated_at) DO NOTHING;
                            """;
 
@@ -84,6 +86,8 @@ public sealed class NotificationEventRepository : INotificationEventRepository
                 unread = ev.Unread ? 1L : 0L,
                 lastReadAt = ev.LastReadAt?.ToUniversalTime().ToString("O"),
                 rawJson = ev.RawJson,
+                actorLogin = ev.ActorLogin,
+                latestCommentUrl = ev.Subject.LatestCommentApiUrl,
             },
             cancellationToken: ct)).ConfigureAwait(false);
 
@@ -100,10 +104,14 @@ public sealed class NotificationEventRepository : INotificationEventRepository
 
         await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
 
-        // Order by datetime(observed_at) so legacy/mixed-offset rows keep
-        // chronological order even if a future writer slips in a non-UTC
-        // ISO-8601 string. id DESC breaks ties so two rows observed at the
-        // exact same instant still have a stable order.
+        // Tween-like timeline: newest goes at the bottom, so the UI receives
+        // events oldest-first. The inner query caps to the latest N rows by
+        // observed_at (when WE saw them) so a v4 backfill of historical
+        // notifications still surfaces. The outer ORDER uses
+        // source_updated_at — i.e. the GitHub thread's updated_at — so the
+        // displayed order matches the "Updated" column the user sees and
+        // chronologically reflects upstream activity rather than an
+        // arbitrary side-effect of when our sync ran.
         const string sql = """
                            SELECT id AS Id,
                                   account_id AS AccountId,
@@ -119,11 +127,26 @@ public sealed class NotificationEventRepository : INotificationEventRepository
                                   observed_at AS ObservedAt,
                                   unread AS Unread,
                                   last_read_at AS LastReadAt,
-                                  raw_json AS RawJson
-                           FROM notification_events
-                           WHERE account_id = @accountId
-                           ORDER BY datetime(observed_at) DESC, id DESC
-                           LIMIT @limit;
+                                  raw_json AS RawJson,
+                                  actor_login AS ActorLogin,
+                                  latest_comment_url AS LatestCommentUrl
+                           FROM (
+                             SELECT *
+                             FROM notification_events
+                             WHERE account_id = @accountId
+                             -- Tie-break by source_updated_at BEFORE id so a
+                             -- v4 backfill that stamps every row with the
+                             -- same observed_at still keeps the freshest
+                             -- upstream events inside the window. Without
+                             -- this, source_updated_at-ordered timelines
+                             -- can lose their newest rows when 200+ legacy
+                             -- rows share an observed_at.
+                             ORDER BY datetime(observed_at) DESC,
+                                      datetime(source_updated_at) DESC,
+                                      id DESC
+                             LIMIT @limit
+                           )
+                           ORDER BY datetime(source_updated_at) ASC, id ASC;
                            """;
 
         var rows = await connection.QueryAsync<NotificationEventRow>(new CommandDefinition(
@@ -179,9 +202,67 @@ public sealed class NotificationEventRepository : INotificationEventRepository
             cancellationToken: ct)).ConfigureAwait(false);
     }
 
+    public async Task<DateTimeOffset?> GetMaxSourceUpdatedAtForThreadAsync(string accountId, string notificationId, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(accountId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(notificationId);
+
+        await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
+
+        const string sql = """
+                           SELECT source_updated_at
+                           FROM notification_events
+                           WHERE account_id = @accountId
+                             AND notification_id = @notificationId
+                           ORDER BY datetime(source_updated_at) DESC
+                           LIMIT 1;
+                           """;
+
+        var raw = await connection.QuerySingleOrDefaultAsync<string?>(new CommandDefinition(
+            sql,
+            new { accountId, notificationId },
+            cancellationToken: ct)).ConfigureAwait(false);
+
+        if (string.IsNullOrEmpty(raw))
+        {
+            return null;
+        }
+
+        return DateTimeOffset.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.RoundtripKind, out var value)
+            ? value
+            : null;
+    }
+
+    public async Task<int> SetActorLoginAsync(long eventId, string actorLogin, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(actorLogin);
+        if (eventId <= 0)
+        {
+            // 0 means not-yet-persisted; nothing to update.
+            return 0;
+        }
+
+        await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
+
+        // Lazy backfill targeting one specific event row by autoincrement id.
+        // The caller has just resolved a real author login from a per-thread
+        // fetch, so overwriting any prior value with the freshest signal is
+        // correct (no COALESCE).
+        const string sql = """
+                           UPDATE notification_events
+                              SET actor_login = @actorLogin
+                            WHERE id = @eventId;
+                           """;
+        return await connection.ExecuteAsync(new CommandDefinition(
+            sql,
+            new { eventId, actorLogin },
+            cancellationToken: ct)).ConfigureAwait(false);
+    }
+
     private static NotificationEvent Map(NotificationEventRow row)
     {
-        var subject = new NotificationSubject(row.SubjectType, row.SubjectTitle, row.SubjectApiUrl, row.WebUrl);
+        var subject = new NotificationSubject(row.SubjectType, row.SubjectTitle, row.SubjectApiUrl, row.WebUrl, row.LatestCommentUrl);
         var reason = Enum.TryParse<NotificationReason>(row.Reason, ignoreCase: false, out var parsed)
             ? parsed
             : NotificationReason.Unknown;
@@ -198,7 +279,8 @@ public sealed class NotificationEventRepository : INotificationEventRepository
             ObservedAt: DateTimeOffset.Parse(row.ObservedAt, null, DateTimeStyles.RoundtripKind),
             Unread: row.Unread != 0,
             LastReadAt: ParseNullableDate(row.LastReadAt),
-            RawJson: row.RawJson ?? string.Empty);
+            RawJson: row.RawJson ?? string.Empty,
+            ActorLogin: row.ActorLogin);
     }
 
     private static DateTimeOffset? ParseNullableDate(string? value) =>

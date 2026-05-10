@@ -130,6 +130,21 @@ public partial class SettingsViewModel : ViewModelBase
 
         public Task MarkThreadReadAsync(string pat, string threadId, CancellationToken ct = default)
             => Task.CompletedTask;
+
+        public Task<string?> GetSubjectBodyAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+            => Task.FromResult<string?>(null);
+
+        public Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default)
+            => Task.FromResult<string?>(null);
+
+        public Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default)
+            => Task.FromResult<string?>(null);
+
+        public Task<(string? Body, string? AuthorLogin)> GetLatestCommentDetailsAsync(string pat, string threadId, CancellationToken ct = default)
+            => Task.FromResult<(string?, string?)>((null, null));
+
+        public Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndAuthorAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+            => Task.FromResult<(string?, string?)>((null, null));
     }
 
     private sealed class EmptyNotificationRepository : INotificationRepository
@@ -144,6 +159,9 @@ public partial class SettingsViewModel : ViewModelBase
             => Task.FromResult<IReadOnlyList<Ghuboon.Core.Domain.GitHubNotification>>(Array.Empty<Ghuboon.Core.Domain.GitHubNotification>());
 
         public Task<int> DeleteOlderThanAsync(DateTimeOffset cutoff, CancellationToken ct = default)
+            => Task.FromResult(0);
+
+        public Task<int> SetActorLoginAsync(string id, string actorLogin, CancellationToken ct = default)
             => Task.FromResult(0);
     }
 }

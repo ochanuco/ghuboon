@@ -121,14 +121,18 @@ public class DbBackedTimelineServiceTests
     }
 
     [Fact]
-    public async Task Load_OrdersByObservedAtDesc()
+    public async Task Load_OrdersBySourceUpdatedAtAscending()
     {
+        // Tween-like timeline: oldest-first so the newest activity sits at
+        // the bottom of the UI ListBox. Ordering is by source_updated_at
+        // (the GitHub thread updated_at) so the row order matches the
+        // "Updated" column the user sees.
         var (svc, _, _) = Build();
         var result = await svc.LoadAsync(TimelineFilter.Default);
 
         for (int i = 1; i < result.Count; i++)
         {
-            Assert.True(result[i - 1].ObservedAt >= result[i].ObservedAt);
+            Assert.True(result[i - 1].SourceUpdatedAt <= result[i].SourceUpdatedAt);
         }
     }
 

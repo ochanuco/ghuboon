@@ -2,6 +2,7 @@ using System;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -32,6 +33,17 @@ public partial class TimelineViewModel : ViewModelBase
 
     [ObservableProperty]
     private bool _isLoading;
+
+    [ObservableProperty]
+    private TimelineItemViewModel? _selectedItem;
+
+    partial void OnSelectedItemChanged(TimelineItemViewModel? value)
+    {
+        if (value is null) return;
+        // Lazy-load the PR/Issue body for the detail pane. Fire-and-forget;
+        // EnsureBodyLoadedAsync swallows non-fatal errors and is idempotent.
+        _ = value.EnsureBodyLoadedAsync();
+    }
 
     public TimelineViewModel()
         : this(new StubTimelineService())
@@ -195,6 +207,14 @@ public partial class TimelineViewModel : ViewModelBase
                 Items.Add(item);
             }
             RecomputeAggregates();
+
+            // Backfill ActorLogin for rows that don't have one persisted yet.
+            // Fires EnsureBodyLoadedAsync sequentially in the background so the
+            // User column resolves to the real commenter (e.g. @coderabbitai)
+            // without the user having to click each row first. Limited to one
+            // concurrent fetch to avoid hammering the GitHub API; ~50 rows
+            // settles in under a minute and is well within rate limit.
+            _ = Task.Run(() => BackfillActorLoginsAsync(Items.ToArray(), cts.Token), cts.Token);
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested)
         {
@@ -207,6 +227,38 @@ public partial class TimelineViewModel : ViewModelBase
                 _loadCts = null;
             }
             IsLoading = false;
+        }
+    }
+
+    private static async Task BackfillActorLoginsAsync(TimelineItemViewModel[] snapshot, CancellationToken ct)
+    {
+        foreach (var item in snapshot)
+        {
+            if (ct.IsCancellationRequested) return;
+            // Skip rows that already have a real (non-bot) actor — those
+            // came from sync-time resolve and represent the PR/Issue
+            // creator. Bot-suffix logins ("[bot]") are likely stale
+            // commenter values from before sync-time actor resolution
+            // landed; re-fetch to get the real subject author.
+            if (!string.IsNullOrEmpty(item.ActorLogin)
+                && !item.ActorLogin.EndsWith("[bot]", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            try
+            {
+                await item.EnsureBodyLoadedAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+            catch
+            {
+                // Per-item failures are non-fatal — keep going so other rows
+                // still resolve. EnsureBodyLoadedAsync swallows recoverable
+                // errors itself; this catch handles the unlikely re-throws.
+            }
         }
     }
 

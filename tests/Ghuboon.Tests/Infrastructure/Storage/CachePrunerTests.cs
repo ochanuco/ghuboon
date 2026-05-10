@@ -27,6 +27,9 @@ public class CachePrunerTests
             CallCount++;
             return Task.FromResult(Result);
         }
+
+        public Task<int> SetActorLoginAsync(string id, string actorLogin, CancellationToken ct = default)
+            => Task.FromResult(0);
     }
 
     [Fact]

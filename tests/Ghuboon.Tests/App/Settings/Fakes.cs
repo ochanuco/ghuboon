@@ -77,6 +77,9 @@ internal sealed class FakeNotificationRepository : INotificationRepository
         DeleteOlderThanCalls.Add(cutoff);
         return Task.FromResult(RowsToReturn);
     }
+
+    public Task<int> SetActorLoginAsync(string id, string actorLogin, CancellationToken ct = default)
+        => Task.FromResult(0);
 }
 
 internal sealed class FakeGitHubApiClient : IGitHubApiClient
@@ -96,4 +99,19 @@ internal sealed class FakeGitHubApiClient : IGitHubApiClient
 
     public Task MarkThreadReadAsync(string pat, string threadId, CancellationToken ct = default)
         => Task.CompletedTask;
+
+    public Task<string?> GetSubjectBodyAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+        => Task.FromResult<string?>(null);
+
+    public Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default)
+        => Task.FromResult<string?>(null);
+
+    public Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default)
+        => Task.FromResult<string?>(null);
+
+    public Task<(string? Body, string? AuthorLogin)> GetLatestCommentDetailsAsync(string pat, string threadId, CancellationToken ct = default)
+        => Task.FromResult<(string?, string?)>((null, null));
+
+    public Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndAuthorAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+        => Task.FromResult<(string?, string?)>((null, null));
 }

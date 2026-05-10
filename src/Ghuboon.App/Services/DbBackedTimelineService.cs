@@ -71,6 +71,18 @@ public sealed class DbBackedTimelineService : ITimelineService
         // Tab filter.
         q = q.Where(n => MatchesTab(n.Reason, filter.Tab));
 
+        // My PRs is "PR rows" only — Kind == PullRequest. Comment rows
+        // (CR walkthroughs, replies, etc.) and Issue rows are filtered
+        // out so the tab shows one row per observed PR state transition
+        // (creation, Draft toggle, ready). Legacy rows that pre-date the
+        // latest_comment_url snapshot keep their subject.type-derived
+        // kind, so PullRequest rows from before Migration v6 still
+        // surface in the tab.
+        if (filter.Tab == TimelineTab.MyPrs)
+        {
+            q = q.Where(n => n.Subject.Kind == NotificationEventKind.PullRequest);
+        }
+
         // Repo filter.
         if (!string.IsNullOrEmpty(filter.RepositoryFullName))
         {

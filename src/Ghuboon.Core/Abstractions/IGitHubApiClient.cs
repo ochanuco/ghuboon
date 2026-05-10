@@ -28,6 +28,49 @@ public interface IGitHubApiClient
     /// <c>PATCH /notifications/threads/{thread_id}</c>.
     /// </summary>
     Task MarkThreadReadAsync(string pat, string threadId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Fetches the body of a notification subject via the API URL on the
+    /// notification's <c>subject.url</c>. For PullRequest / Issue subjects this
+    /// returns the description; for Comment-typed subjects returns the latest
+    /// comment body. Returns null if the subject doesn't expose a body or the
+    /// fetch fails (callers display a placeholder).
+    /// </summary>
+    Task<string?> GetSubjectBodyAsync(string pat, string subjectApiUrl, CancellationToken ct = default);
+
+    /// <summary>
+    /// Fetches the notification thread metadata via
+    /// <c>GET /notifications/threads/{thread_id}</c>. Used to recover the
+    /// <c>subject.url</c> for cached rows that lost it (legacy data).
+    /// Returns null on failure.
+    /// </summary>
+    Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Fetches the latest comment body on a notification thread by following
+    /// <c>subject.latest_comment_url</c> from
+    /// <c>GET /notifications/threads/{thread_id}</c> and reading the
+    /// downstream <c>body</c> field. Returns null when the thread has no
+    /// comment yet, or when the fetch fails.
+    /// </summary>
+    Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Same as <see cref="GetLatestCommentBodyAsync"/> but also returns the
+    /// commenter's GitHub login. Used by the detail pane to attribute the
+    /// comment correctly (e.g. <c>@coderabbitai</c>) instead of falling
+    /// back to the repo owner.
+    /// </summary>
+    Task<(string? Body, string? AuthorLogin)> GetLatestCommentDetailsAsync(string pat, string threadId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Same as <see cref="GetSubjectBodyAsync"/> but also returns the
+    /// subject's author login (the PR/Issue creator). Used by description-
+    /// mode rows so the User column attributes the row to the PR author
+    /// (e.g. <c>@ochanuco</c> for self-authored PRs) instead of inheriting
+    /// a previously-persisted commenter actor.
+    /// </summary>
+    Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndAuthorAsync(string pat, string subjectApiUrl, CancellationToken ct = default);
 }
 
 /// <summary>

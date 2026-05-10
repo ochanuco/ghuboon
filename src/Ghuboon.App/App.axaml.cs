@@ -14,6 +14,7 @@ using Ghuboon.Core.Abstractions;
 using Ghuboon.Infrastructure.Credentials;
 using Ghuboon.Infrastructure.GitHub;
 using Ghuboon.Infrastructure.Logging;
+using Ghuboon.Infrastructure.Notifications;
 using Ghuboon.Infrastructure.Storage;
 using Ghuboon.Infrastructure.Sync;
 using Serilog.Core;
@@ -121,6 +122,35 @@ public partial class App : Application
             clock,
             _logger,
             defaultAccountId: AppSettingsService.PrimaryAccountId);
+
+        // 6a. OS desktop notifications. The sync service raises
+        // NewNotifications for high-priority new threads; the gate dedupes
+        // via notification_local_states.last_notified_at and the platform
+        // service shells out to osascript on macOS.
+        IDesktopNotificationGate notifyGate = new HighPriorityNotificationGate(dbFactory, clock);
+        IDesktopNotificationService notifyService = DesktopNotificationFactory.Create(_logger!);
+        _syncService.NewNotifications += async (_, ev) =>
+        {
+            try
+            {
+                var toShow = await notifyGate
+                    .FilterAsync(ev.AccountId, ev.HighPriorityNew)
+                    .ConfigureAwait(false);
+                foreach (var n in toShow)
+                {
+                    var dn = new DesktopNotification(
+                        Id: n.Id,
+                        Title: $"{n.Reason}: {n.RepositoryFullName}",
+                        Body: n.Subject.Title,
+                        Url: n.Subject.WebUrl);
+                    await notifyService.ShowAsync(dn).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.Warning(ex, "Desktop notification dispatch failed");
+            }
+        };
 
         // 7. App settings facade.
         IAppSettingsService appSettings = new AppSettingsService(accountRepo, settingsRepo);

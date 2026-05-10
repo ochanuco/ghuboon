@@ -78,5 +78,20 @@ public class PatValidationServiceTests
 
         public Task MarkThreadReadAsync(string pat, string threadId, CancellationToken ct = default)
             => throw new NotImplementedException();
+
+        public Task<string?> GetSubjectBodyAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+            => throw new NotImplementedException();
+
+        public Task<string?> GetThreadSubjectUrlAsync(string pat, string threadId, CancellationToken ct = default)
+            => throw new NotImplementedException();
+
+        public Task<string?> GetLatestCommentBodyAsync(string pat, string threadId, CancellationToken ct = default)
+            => throw new NotImplementedException();
+
+        public Task<(string? Body, string? AuthorLogin)> GetLatestCommentDetailsAsync(string pat, string threadId, CancellationToken ct = default)
+            => throw new NotImplementedException();
+
+        public Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndAuthorAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+            => throw new NotImplementedException();
     }
 }

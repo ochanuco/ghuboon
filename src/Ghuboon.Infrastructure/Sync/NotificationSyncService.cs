@@ -220,16 +220,29 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                     RateLimitRemaining = response.RateLimit.Remaining,
                     RateLimitResetAt = response.RateLimit.ResetAt,
                 }, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger?.Warning(ex, "Post-304 sync-state persistence failed");
+                var dbResult = new SyncResult(false, 0, 0, 0, ErrorCategory.Database, ex.Message, response.RateLimit);
+                RaiseProgress(accountId, SyncStage.Failed, dbResult);
+                return dbResult;
+            }
 
-                RaiseProgress(accountId, SyncStage.Pruning, null);
+            // Pruning is best-effort on the 304 path too — matches the
+            // non-304 path below so a prune-only failure can never flip a
+            // successful sync into a failed result. The data we just
+            // confirmed-fresh is already persisted by the etag bookkeeping
+            // above; deletion of stale rows is a janitor task that retries
+            // on the next sync.
+            RaiseProgress(accountId, SyncStage.Pruning, null);
+            try
+            {
                 await PruneAsync(now, ct).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger?.Warning(ex, "Post-304 bookkeeping failed");
-                var dbResult = new SyncResult(false, 0, 0, 0, ErrorCategory.Database, ex.Message, response.RateLimit);
-                RaiseProgress(accountId, SyncStage.Failed, dbResult);
-                return dbResult;
+                _logger?.Warning(ex, "Post-304 cache prune failed");
             }
 
             var notModifiedResult = new SyncResult(true, 0, 0, 0, null, null, response.RateLimit);
@@ -278,6 +291,30 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 // the API client carries the original GitHub JSON forward
                 // (Phase 7 follow-up), this snapshot becomes the real raw
                 // payload without any further sync-side change.
+                // Resolve the actor (commenter for Comment kind, creator
+                // for PR/Issue/...) up-front so the User column is populated
+                // the moment the row appears — no lazy backfill, no per-row
+                // click required.
+                //
+                // Skip the lookup entirely when the cached notification row
+                // already has an actor for this thread: the new event row
+                // inherits the value via SetActorLoginAsync below, and re-
+                // fetching every sync wastes API budget on data we already
+                // have. We still resolve when:
+                //   * isNew (no cached row at all)
+                //   * existing.ActorLogin is null (never resolved)
+                //   * the notification's Kind has changed since the last
+                //     observation (the prior commenter no longer represents
+                //     the new event row's content).
+                var existingKind = existing?.Subject.Kind;
+                var newKind = notification.Subject.Kind;
+                var needsActorLookup = existing is null
+                    || string.IsNullOrEmpty(existing.ActorLogin)
+                    || existingKind != newKind;
+                var actorLogin = needsActorLookup
+                    ? await ResolveActorLoginAsync(pat, notification, ct).ConfigureAwait(false)
+                    : existing!.ActorLogin;
+
                 var snapshot = new NotificationEvent(
                     Id: 0,
                     AccountId: notification.AccountId,
@@ -290,10 +327,12 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                     ObservedAt: now,
                     Unread: notification.Unread,
                     LastReadAt: notification.LastReadAt,
-                    RawJson: rawJson);
+                    RawJson: rawJson,
+                    ActorLogin: actorLogin);
+                var eventAppended = false;
                 try
                 {
-                    await _eventRepository.TryAppendAsync(snapshot, ct).ConfigureAwait(false);
+                    eventAppended = await _eventRepository.TryAppendAsync(snapshot, ct).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -303,17 +342,47 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                     _logger?.Warning(ex, "Append notification event failed for {NotificationId}", notification.Id);
                 }
 
+                // Persist the thread-level actor whenever we just resolved a
+                // fresh value AND the cached row still lacks one (or the
+                // resolved value differs from the cache). The notification
+                // row's actor_login feeds the timeline's User column for any
+                // sibling event rows that pre-date sync-time resolution, so
+                // backfilling here closes the gap for existing legacy data
+                // without waiting on a row click.
+                if (eventAppended
+                    && needsActorLookup
+                    && !string.IsNullOrEmpty(actorLogin)
+                    && !string.Equals(existing?.ActorLogin, actorLogin, StringComparison.Ordinal))
+                {
+                    try
+                    {
+                        await _notificationRepository
+                            .SetActorLoginAsync(notification.Id, actorLogin!, ct)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger?.Information(ex, "Seeding actor_login for {NotificationId} failed (non-fatal)", notification.Id);
+                    }
+                }
+
                 if (isNew)
                 {
                     newCount++;
-                    if (HighPriorityReasons.Contains(notification.Reason))
-                    {
-                        highPriorityNew.Add(notification);
-                    }
                 }
                 else
                 {
                     updatedCount++;
+                }
+
+                // OS-banner trigger: any newly-observed event (new thread OR
+                // existing thread with a fresh source_updated_at) deserves a
+                // banner if the reason is high-priority. Without this an
+                // authored PR's CI / state-change / comment activity stayed
+                // silent because isNew was false on every re-observation.
+                if (eventAppended && HighPriorityReasons.Contains(notification.Reason))
+                {
+                    highPriorityNew.Add(notification);
                 }
 
                 if (!string.IsNullOrEmpty(notification.RepositoryFullName) &&
@@ -615,6 +684,48 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
         }
 
         return (fullName[..slash], fullName[(slash + 1)..]);
+    }
+
+    /// <summary>
+    /// Best-effort actor lookup at sync time, dispatched on
+    /// <see cref="NotificationSubject.Kind"/>:
+    ///   * Comment kind → fetch the commenter login via latest_comment_url.
+    ///   * PR / Issue / Discussion / etc. → fetch the subject creator via
+    ///     subject.url.
+    /// The actor in either case represents the person who PRODUCED this
+    /// row's content (commenter for comment rows, creator for PR rows),
+    /// so the timeline's User column attributes correctly per row.
+    /// Returns null on any failure — the row falls back to lazy backfill
+    /// on selection.
+    /// </summary>
+    private async Task<string?> ResolveActorLoginAsync(string pat, GitHubNotification notification, CancellationToken ct)
+    {
+        var subject = notification.Subject;
+        var url = subject.Kind == NotificationEventKind.Comment
+            ? subject.LatestCommentApiUrl
+            : subject.ApiUrl;
+
+        if (string.IsNullOrEmpty(url))
+        {
+            return null;
+        }
+
+        try
+        {
+            var (_, login) = await _apiClient
+                .GetSubjectBodyAndAuthorAsync(pat, url, ct)
+                .ConfigureAwait(false);
+            return login;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger?.Information(ex, "Actor lookup at sync time failed for {NotificationId} (non-fatal)", notification.Id);
+            return null;
+        }
     }
 
     private static string SynthesizeRawJson(GitHubNotification notification)

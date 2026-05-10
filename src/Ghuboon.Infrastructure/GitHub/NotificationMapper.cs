@@ -59,7 +59,8 @@ internal static class NotificationMapper
             Type: subjectType,
             Title: subjectTitle,
             ApiUrl: subjectApiUrl,
-            WebUrl: webUrl
+            WebUrl: webUrl,
+            LatestCommentApiUrl: dto.Subject?.LatestCommentUrl
         );
 
         var reason = NotificationReasonMap.From(dto.Reason);

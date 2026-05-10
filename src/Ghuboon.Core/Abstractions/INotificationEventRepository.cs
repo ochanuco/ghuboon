@@ -38,4 +38,23 @@ public interface INotificationEventRepository
     /// <paramref name="cutoff"/>. Returns the number of rows removed.
     /// </summary>
     Task<int> DeleteOlderThanAsync(DateTimeOffset cutoff, CancellationToken ct = default);
+
+    /// <summary>
+    /// Return the maximum <c>source_updated_at</c> across every event row for
+    /// a given thread. Used by the detail pane to decide whether the row the
+    /// user just selected is the latest observation of the thread (show
+    /// latest comment) or an older one (show subject body).
+    /// </summary>
+    Task<DateTimeOffset?> GetMaxSourceUpdatedAtForThreadAsync(
+        string accountId,
+        string notificationId,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Lazily backfill the per-event actor login (e.g. <c>"coderabbitai[bot]"</c>)
+    /// for a single event row. Used when a row is selected and the detail-pane
+    /// fetch surfaces the latest comment author. Updates only the matching
+    /// event id and returns the number of rows affected (0 or 1).
+    /// </summary>
+    Task<int> SetActorLoginAsync(long eventId, string actorLogin, CancellationToken ct = default);
 }

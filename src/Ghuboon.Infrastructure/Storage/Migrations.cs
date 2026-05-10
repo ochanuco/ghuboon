@@ -347,5 +347,101 @@ internal static class Migrations
                  CREATE UNIQUE INDEX ux_events_dedup
                    ON notification_events(account_id, notification_id, source_updated_at);
                  """),
+
+        // ----------------------------------------------------------------
+        // Migration v4 (event log backfill):
+        //   v3 introduced notification_events but only newly upserted
+        //   notifications append events. Existing cached notifications (from
+        //   pre-v3 fetches) had no event rows, so the timeline rendered
+        //   empty until a fresh upstream change came in. This migration
+        //   seeds one event per existing notification using its latest
+        //   updated_at as the source_updated_at and synced_at (or
+        //   updated_at as a fallback) as the observed_at. The UNIQUE
+        //   (account_id, notification_id, source_updated_at) index makes
+        //   the INSERT OR IGNORE idempotent — if v3 already wrote an
+        //   identical row it is skipped here.
+        new Migration(
+            Version: 4,
+            Name: "notification_events_backfill",
+            Sql: """
+                 INSERT OR IGNORE INTO notification_events (
+                   account_id, notification_id, thread_id, repository_full_name,
+                   subject_type, subject_title, subject_api_url, web_url, reason,
+                   source_updated_at, observed_at, unread, last_read_at, raw_json
+                 )
+                 SELECT
+                   account_id,
+                   id AS notification_id,
+                   thread_id,
+                   repository_full_name,
+                   subject_type,
+                   subject_title,
+                   subject_api_url,
+                   web_url,
+                   reason,
+                   updated_at AS source_updated_at,
+                   COALESCE(synced_at, updated_at) AS observed_at,
+                   unread,
+                   last_read_at,
+                   raw_json
+                 FROM notifications;
+                 """),
+
+        // ----------------------------------------------------------------
+        // Migration v5 (per-event actor login):
+        //   The notifications listing API does not include an actor field, so
+        //   the timeline used to fall back to the repo owner login for the
+        //   "User" column. Comments by bots (e.g. @coderabbitai[bot]) showed
+        //   up as the repo owner, which is misleading. To support a lazy
+        //   per-row backfill on selection, both notifications and
+        //   notification_events grow a nullable actor_login column. SQLite
+        //   permits ALTER TABLE ADD COLUMN for nullable columns without the
+        //   rename/copy/drop dance, so we stay simple here. Legacy rows keep
+        //   actor_login = NULL until the detail-pane fetch lazily backfills
+        //   them; the UI falls back to the repo owner login when the column
+        //   is null.
+        new Migration(
+            Version: 5,
+            Name: "actor_login_columns",
+            Sql: """
+                 ALTER TABLE notifications ADD COLUMN actor_login TEXT;
+                 ALTER TABLE notification_events ADD COLUMN actor_login TEXT;
+                 """),
+
+        // ----------------------------------------------------------------
+        // Migration v6 (per-event latest_comment_url snapshot):
+        //   GitHub's notification listing surfaces subject.latest_comment_url,
+        //   which points either at the subject (no comment yet / non-comment
+        //   activity) or at a /comments/{id} endpoint (comment activity).
+        //   Capturing it per event lets the timeline distinguish "PR
+        //   description rows" from "comment rows" without an extra fetch,
+        //   so the My PRs tab can filter to PR-creation / Draft / state-
+        //   change events and skip the noise of CR / bot comment threads.
+        //   Legacy rows keep latest_comment_url = NULL; the filter treats
+        //   NULL as "unknown / include" so old data stays visible.
+        new Migration(
+            Version: 6,
+            Name: "latest_comment_url_columns",
+            Sql: """
+                 ALTER TABLE notifications ADD COLUMN latest_comment_url TEXT;
+                 ALTER TABLE notification_events ADD COLUMN latest_comment_url TEXT;
+                 """),
+
+        // ----------------------------------------------------------------
+        // Migration v7 (mark-as-read index):
+        //   MarkThreadAsReadAsync flips every sibling event row for a
+        //   thread by (account_id, notification_id) — the existing v3
+        //   indexes only cover the listing pager and the unique dedup, so
+        //   the UPDATE walked the whole append-only table. As notification
+        //   events accumulate (one row per observed update, retained 30
+        //   days) every read action grew slower. Add a covering index so
+        //   the UPDATE plan stays O(matches) rather than O(table).
+        new Migration(
+            Version: 7,
+            Name: "events_mark_read_index",
+            Sql: """
+                 CREATE INDEX IF NOT EXISTS ix_events_account_notification
+                   ON notification_events(account_id, notification_id);
+                 """),
     };
 }
