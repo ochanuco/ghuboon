@@ -57,6 +57,8 @@ public partial class TimelineViewModel : ViewModelBase
     [ObservableProperty]
     private TimelineItemViewModel? _detailItem;
 
+    private bool _repaintingTints;
+
     partial void OnSelectedItemChanged(TimelineItemViewModel? value)
     {
         // Repaint per-row tints: selected row gets blue, same-thread
@@ -64,15 +66,30 @@ public partial class TimelineViewModel : ViewModelBase
         // Operate on the master cache so rows that are filtered out of
         // the current Items still get their flags updated for when they
         // re-enter the filtered view.
-        var threadId = value?.NotificationId;
-        var hasFocus = !string.IsNullOrEmpty(threadId);
-        foreach (var item in _allItems)
+        //
+        // Re-entrance guard: setting IsSelectedRow / IsRelatedToFocus
+        // changes RowBackgroundColor → ListBoxItem invalidates → in some
+        // Avalonia configurations the ListBox flips its own SelectedItem
+        // mid-loop, which would re-fire this handler and recurse. The
+        // guard makes the inner repaint a no-op.
+        if (_repaintingTints) return;
+        _repaintingTints = true;
+        try
         {
-            var isSelected = ReferenceEquals(item, value);
-            item.IsSelectedRow = isSelected;
-            item.IsRelatedToFocus = hasFocus
-                && !isSelected
-                && string.Equals(item.NotificationId, threadId, StringComparison.Ordinal);
+            var threadId = value?.NotificationId;
+            var hasFocus = !string.IsNullOrEmpty(threadId);
+            foreach (var item in _allItems)
+            {
+                var isSelected = ReferenceEquals(item, value);
+                item.IsSelectedRow = isSelected;
+                item.IsRelatedToFocus = hasFocus
+                    && !isSelected
+                    && string.Equals(item.NotificationId, threadId, StringComparison.Ordinal);
+            }
+        }
+        finally
+        {
+            _repaintingTints = false;
         }
 
         if (value is null) return;
