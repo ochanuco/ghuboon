@@ -3,6 +3,9 @@ using Ghuboon.Infrastructure.Storage;
 
 namespace Ghuboon.Tests.Infrastructure.Storage;
 
+[CollectionDefinition("EnvVarSensitive", DisableParallelization = true)]
+public class EnvVarSensitiveCollection { }
+
 /// <summary>
 /// Issue #12: validate that <see cref="StoragePaths"/> resolves a non-empty,
 /// platform-appropriate directory under the runtime we're executing on. We
@@ -10,6 +13,7 @@ namespace Ghuboon.Tests.Infrastructure.Storage;
 /// we can verify the result is non-empty, ends with the app folder name, and
 /// matches the OS convention.
 /// </summary>
+[Collection("EnvVarSensitive")]
 public class StoragePathsTests
 {
     [Fact]
