@@ -29,6 +29,7 @@
 //     Dispatcher.UIThread.Post (see App.axaml.cs).
 
 using System;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 
@@ -233,8 +234,20 @@ public sealed class MacOSMenuBarHost : IMenuBarHost
         {
             if (handle.Target is UnreadCountUpdate u)
             {
-                try { u.Host.ApplyUnreadCountOnMainThread(u.Count); }
-                catch { /* swallow into native frame */ }
+                try
+                {
+                    u.Host.ApplyUnreadCountOnMainThread(u.Count);
+                }
+                catch (Exception ex)
+                {
+                    // Issue #43: log before swallowing so cross-native-boundary
+                    // failures aren't silently lost. We must still swallow to
+                    // avoid letting a managed exception propagate into the
+                    // libdispatch frame, which would crash the process.
+                    Trace.WriteLine(
+                        $"MacOSMenuBarHost.DispatchUnreadCount: ApplyUnreadCountOnMainThread failed " +
+                        $"(count={u.Count}, host={u.Host.GetType().FullName}): {ex}");
+                }
             }
         }
         finally
