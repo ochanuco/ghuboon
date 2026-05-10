@@ -121,7 +121,8 @@ public partial class AccountSettingsViewModel : ViewModelBase
         {
             // Snapshot the input so a concurrent edit cannot desync the
             // value-being-validated from the field state we read on completion.
-            var pat = PatInput;
+            // Trim because pasting from a browser often grabs trailing whitespace.
+            var pat = PatInput?.Trim() ?? string.Empty;
             var outcome = await _validator.ValidateAsync(pat, ct).ConfigureAwait(true);
             ApplyOutcome(outcome);
         }
@@ -139,7 +140,8 @@ public partial class AccountSettingsViewModel : ViewModelBase
         {
             // Snapshot the input up front so a concurrent edit cannot cause
             // the saved credential to disagree with the validated PAT.
-            var pat = PatInput;
+            // Trim because pasting from a browser often grabs trailing whitespace.
+            var pat = PatInput?.Trim() ?? string.Empty;
             var outcome = await _validator.ValidateAsync(pat, ct).ConfigureAwait(true);
             ApplyOutcome(outcome);
 
