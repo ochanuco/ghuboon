@@ -190,11 +190,17 @@ public class NotificationSyncServiceTests
         await service.SyncAsync(AccountId);
 
         var ev = Assert.Single(fired);
-        Assert.Equal(4, ev.HighPriorityNew.Count);
+        // Allow-list: Review/Mention/TeamMention/Assigned/MyPr/State/Comment.
+        // The set was widened beyond ADR-021's original four after the user
+        // wanted authored-PR activity (MyPr), state transitions (State),
+        // and comment threads (Comment) to also fire OS banners.
+        Assert.Equal(6, ev.HighPriorityNew.Count);
         Assert.Contains(ev.HighPriorityNew, n => n.Reason == NotificationReason.Review);
         Assert.Contains(ev.HighPriorityNew, n => n.Reason == NotificationReason.Mention);
         Assert.Contains(ev.HighPriorityNew, n => n.Reason == NotificationReason.TeamMention);
         Assert.Contains(ev.HighPriorityNew, n => n.Reason == NotificationReason.Assigned);
+        Assert.Contains(ev.HighPriorityNew, n => n.Reason == NotificationReason.MyPr);
+        Assert.Contains(ev.HighPriorityNew, n => n.Reason == NotificationReason.Comment);
     }
 
     [Fact]

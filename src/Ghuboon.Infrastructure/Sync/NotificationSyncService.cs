@@ -188,6 +188,20 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
             return dbResult;
         }
 
+        // "Have we ever synced before?" — used to suppress an avalanche
+        // of OS banners on initial install where every cached unread
+        // thread looks brand-new. We OR two signals:
+        //   * LastSuccessfulSyncAt: set on every successful sync.
+        //   * NotificationsEtag: set when GitHub returns an etag.
+        // Either alone would have a gap. GitHub sometimes returns an
+        // empty etag for the notifications endpoint, so a long-running
+        // session with valid LastSuccessfulSyncAt but an empty etag
+        // would otherwise mis-classify as "never synced" and silence
+        // its banners (the user-reported "TL has the row but no banner
+        // for 1–2 minutes" lag).
+        var hasPriorSync = state.LastSuccessfulSyncAt is not null
+            || !string.IsNullOrEmpty(state.NotificationsEtag);
+
         // 4. Call GitHub API.
         RaiseProgress(accountId, SyncStage.Fetching, null);
 
@@ -475,15 +489,11 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
 
         // 9. NewNotifications event — fire BEFORE Progress.Completed so the
         // OS banner is dispatched alongside the timeline reload rather than
-        // racing it. ADR-021's hadPriorEtag gate is removed: the
-        // HighPriorityNotificationGate now dedups per-event via
-        // last_notified_at vs candidate.UpdatedAt, so the "first sync after
-        // a reset spams every cached thread" scenario is already handled
-        // (legacy rows have last_notified_at set from prior sessions and
-        // are suppressed; only genuinely new events fire). The hadPriorEtag
-        // gate added a 1–2 minute lag where the TL had the row but the
-        // banner waited for the NEXT sync that brought a fresh event.
-        if (highPriorityNew.Count > 0)
+        // racing it. Suppressed only on the FIRST EVER sync (no prior
+        // successful sync) so a fresh install doesn't banner every cached
+        // thread; once we've synced once, every later sync fires and the
+        // gate's per-event dedup keeps re-observations quiet.
+        if (hasPriorSync && highPriorityNew.Count > 0)
         {
             try
             {
