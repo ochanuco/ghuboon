@@ -113,21 +113,34 @@ public sealed class AccountRepository : IAccountRepository
             ? null
             : DateTimeOffset.Parse(value, null, System.Globalization.DateTimeStyles.RoundtripKind);
 
-    private static string DeriveApiBaseUrl(string host)
+    internal static string DeriveApiBaseUrl(string? host)
     {
-        // ADR-016: MVP targets github.com. Treat the host string as authoritative
-        // for now; default to the public REST endpoint when host is github.com.
-        if (string.IsNullOrEmpty(host))
+        // ADR-016: MVP targets github.com but the schema/UI accept Enterprise
+        // hosts too. Normalize the input (trim, ensure scheme, parse Uri) and
+        // dispatch off the parsed Uri.Host case-insensitively so callers don't
+        // have to think about scheme presence or trailing slashes.
+        var input = (host ?? string.Empty).Trim().Trim('/');
+        if (input.Length == 0)
         {
             return "https://api.github.com";
         }
 
-        if (host.Equals("github.com", StringComparison.OrdinalIgnoreCase) ||
-            host.Equals("https://github.com", StringComparison.OrdinalIgnoreCase))
+        var withScheme = input.Contains("://", StringComparison.Ordinal)
+            ? input
+            : "https://" + input;
+
+        if (!Uri.TryCreate(withScheme, UriKind.Absolute, out var uri))
         {
             return "https://api.github.com";
         }
 
-        return host.TrimEnd('/') + "/api/v3";
+        if (string.Equals(uri.Host, "github.com", StringComparison.OrdinalIgnoreCase))
+        {
+            return "https://api.github.com";
+        }
+
+        // Enterprise: <scheme>://<host>[:<port>]/api/v3
+        var builder = new UriBuilder(uri.Scheme, uri.Host, uri.IsDefaultPort ? -1 : uri.Port, "/api/v3");
+        return builder.Uri.ToString().TrimEnd('/');
     }
 }

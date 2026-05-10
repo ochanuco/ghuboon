@@ -89,4 +89,26 @@ public class AccountRepositoryTests
         var read = await repo.GetByIdAsync("does-not-exist");
         Assert.Null(read);
     }
+
+    // Issue #12: DeriveApiBaseUrl should normalize input (trim, ensure scheme,
+    // parse Uri) and use uri.Host case-insensitively to detect github.com.
+    [Theory]
+    [InlineData("github.com", "https://api.github.com")]
+    [InlineData("https://github.com", "https://api.github.com")]
+    [InlineData("https://github.com/", "https://api.github.com")]
+    [InlineData("https://github.com/api/v3", "https://api.github.com")]
+    [InlineData("GitHub.COM", "https://api.github.com")]
+    [InlineData("  github.com  ", "https://api.github.com")]
+    [InlineData("ghe.example.com", "https://ghe.example.com/api/v3")]
+    [InlineData("https://ghe.example.com", "https://ghe.example.com/api/v3")]
+    [InlineData("https://ghe.example.com/", "https://ghe.example.com/api/v3")]
+    [InlineData("https://ghe.example.com:8443/", "https://ghe.example.com:8443/api/v3")]
+    [InlineData("http://ghe.internal", "http://ghe.internal/api/v3")]
+    [InlineData("", "https://api.github.com")]
+    [InlineData("   ", "https://api.github.com")]
+    [InlineData(null, "https://api.github.com")]
+    public void DeriveApiBaseUrl_normalizes_input(string? host, string expected)
+    {
+        Assert.Equal(expected, AccountRepository.DeriveApiBaseUrl(host));
+    }
 }
