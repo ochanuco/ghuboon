@@ -62,8 +62,11 @@ internal sealed class FakeNotificationRepository : INotificationRepository
         return Task.FromResult(1);
     }
 
+    public int SetReadStateCallCount { get; private set; }
+
     public Task<int> SetReadStateAsync(string id, bool unread, DateTimeOffset readAt, CancellationToken ct = default)
     {
+        SetReadStateCallCount++;
         var idx = Notifications.FindIndex(n => n.Id == id);
         if (idx < 0) return Task.FromResult(0);
         Notifications[idx] = Notifications[idx] with { Unread = unread, LastReadAt = readAt };

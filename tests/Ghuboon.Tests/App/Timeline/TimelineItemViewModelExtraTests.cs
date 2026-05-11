@@ -59,6 +59,7 @@ public class TimelineItemViewModelExtraTests
         Assert.False(vm.Unread);
         Assert.Empty(api.MarkedReadThreads);
         Assert.Equal(0, repo.UpsertCallCount);
+        Assert.Equal(0, repo.SetReadStateCallCount);
     }
 
     [Fact]
@@ -74,8 +75,10 @@ public class TimelineItemViewModelExtraTests
         Assert.True(vm.Unread);
         Assert.NotNull(vm.FlashMessage);
         Assert.Contains("retry", vm.FlashMessage, StringComparison.OrdinalIgnoreCase);
-        // No local upsert on failure: state stays in sync with the (still-unread) cache.
+        // No local DB write on failure: state stays in sync with the
+        // (still-unread) cache.
         Assert.Equal(0, repo.UpsertCallCount);
+        Assert.Equal(0, repo.SetReadStateCallCount);
     }
 
     [Fact]
