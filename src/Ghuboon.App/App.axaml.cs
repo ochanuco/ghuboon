@@ -134,9 +134,20 @@ public partial class App : Application
         {
             try
             {
+                var bannerStartedAt = DateTimeOffset.UtcNow;
+                _logger?.Information(
+                    "banner.dispatch.start account={AccountId} candidateCount={CandidateCount}",
+                    ev.AccountId,
+                    ev.HighPriorityNew.Count);
                 var toShow = await notifyGate
                     .FilterAsync(ev.AccountId, ev.HighPriorityNew)
                     .ConfigureAwait(false);
+                _logger?.Information(
+                    "banner.dispatch.afterGate account={AccountId} acceptedCount={AcceptedCount} suppressedCount={SuppressedCount} gateMs={GateMs:F0}",
+                    ev.AccountId,
+                    toShow.Count,
+                    ev.HighPriorityNew.Count - toShow.Count,
+                    (DateTimeOffset.UtcNow - bannerStartedAt).TotalMilliseconds);
                 // Fire every banner in parallel: each osascript spawn is
                 // ~50–200 ms and macOS's UserNotificationCenter queues
                 // them anyway, so serializing with `await ShowAsync`

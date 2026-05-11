@@ -187,6 +187,16 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
         // 4. Call GitHub API.
         RaiseProgress(accountId, SyncStage.Fetching, null);
 
+        // Diagnostic trace: log the cadence so we can see polling
+        // intervals and correlate them with per-notification observe
+        // lines below.
+        var fetchStartedAt = _clock.UtcNow;
+        _logger?.Information(
+            "sync.fetch.start account={AccountId} lastSuccessAt={LastSuccessAt:O} etag={HasEtag}",
+            accountId,
+            state.LastSuccessfulSyncAt,
+            !string.IsNullOrEmpty(state.NotificationsEtag));
+
         NotificationsResponse response;
         try
         {
@@ -220,6 +230,13 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
         }
 
         var now = _clock.UtcNow;
+        _logger?.Information(
+            "sync.fetch.done account={AccountId} status={Status} fetchedCount={FetchedCount} durationMs={DurationMs:F0} rateRemaining={RateRemaining}",
+            accountId,
+            response.NotModified ? "304" : "200",
+            response.Notifications.Count,
+            (now - fetchStartedAt).TotalMilliseconds,
+            response.RateLimit.Remaining);
 
         // 5. 304 Not Modified.
         if (response.NotModified)
@@ -400,13 +417,40 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 // suddenly appear" UX bug. We still let them through on
                 // the very first sync (LastSuccessfulSyncAt is null and
                 // hasPriorSync gates the whole event upstream anyway).
-                if (eventAppended
-                    && HighPriorityNotificationReasons.Contains(notification.Reason)
-                    && (state.LastSuccessfulSyncAt is null
-                        || notification.UpdatedAt > state.LastSuccessfulSyncAt))
+                var highPriority = HighPriorityNotificationReasons.Contains(notification.Reason);
+                var gatePassed = state.LastSuccessfulSyncAt is null
+                    || notification.UpdatedAt > state.LastSuccessfulSyncAt;
+                var bannerEligible = eventAppended && highPriority && gatePassed;
+                if (bannerEligible)
                 {
                     highPriorityNew.Add(notification);
                 }
+
+                // Diagnostic trace: capture per-notification observation
+                // so the comment-arrives-before-PR delivery skew can be
+                // attributed to GitHub delivery lag (DeliveryLag big) vs.
+                // our 60s polling cadence (gap small at observation but
+                // SourceUpdatedAt much earlier than now) vs. the stale-
+                // event banner suppression gate misfiring (gatePassed=
+                // false on a row the user actually wants bannered).
+                _logger?.Information(
+                    "sync.observe id={NotificationId} thread={ThreadId} reason={Reason} kind={Kind} " +
+                    "src.updatedAt={SourceUpdatedAt:O} observedAt={ObservedAt:O} deliveryLagSec={DeliveryLagSec:F1} " +
+                    "lastSuccessAt={LastSuccessfulSyncAt:O} isNew={IsNew} eventAppended={EventAppended} " +
+                    "highPriority={HighPriority} gatePassed={GatePassed} bannerEligible={BannerEligible}",
+                    notification.Id,
+                    notification.ThreadId,
+                    notification.Reason,
+                    notification.Subject.Kind,
+                    notification.UpdatedAt,
+                    now,
+                    (now - notification.UpdatedAt).TotalSeconds,
+                    state.LastSuccessfulSyncAt,
+                    isNew,
+                    eventAppended,
+                    highPriority,
+                    gatePassed,
+                    bannerEligible);
 
                 if (!string.IsNullOrEmpty(notification.RepositoryFullName) &&
                     seenRepoFullNames.Add(notification.RepositoryFullName))
