@@ -664,5 +664,22 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
         }
 
         Timeline.PropertyChanged -= OnTimelinePropertyChanged;
+
+        // Cancel + dispose the debounce / flash token sources so any
+        // pending UI callbacks fire as no-ops after the window is
+        // disposed. Without this the 3-second flash auto-clear and
+        // the search/tab 150 ms / 60 ms debounces could still trigger
+        // (and observe a torn VM) after Dispose returned.
+        _flashCts?.Cancel();
+        _flashCts?.Dispose();
+        _flashCts = null;
+
+        _tabDebounce?.Cancel();
+        _tabDebounce?.Dispose();
+        _tabDebounce = null;
+
+        _searchDebounce?.Cancel();
+        _searchDebounce?.Dispose();
+        _searchDebounce = null;
     }
 }

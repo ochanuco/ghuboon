@@ -627,8 +627,19 @@ public partial class TimelineViewModel : ViewModelBase
             // A bookmark flip changes which items belong in the Bookmarks
             // tab's cached list, so clear ALL tab caches (other tabs
             // include / exclude the row identically before/after).
-            // Cheapest correct policy.
             InvalidateTabCache();
+
+            // When the user is currently on the Bookmarks tab, just
+            // clearing the cache isn't enough — the visible Items list
+            // still holds the unbookmarked row until something forces
+            // a re-filter. Re-run the filter now so the row drops out
+            // immediately. For other tabs the cached row count is
+            // unchanged (only the bookmarked_at flag flipped), so
+            // skipping the re-filter is correct.
+            if (_filter.Tab == TimelineTab.Bookmarks)
+            {
+                ApplyFilter(_filter);
+            }
         }
     }
 

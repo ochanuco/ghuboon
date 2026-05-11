@@ -574,7 +574,7 @@ public partial class TimelineItemViewModel : ViewModelBase
     /// persist; if the DB write fails we log but don't revert because the
     /// next reload reads from the DB and reconciles automatically.
     /// </summary>
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task BookmarkAsync(CancellationToken ct)
     {
         if (string.IsNullOrEmpty(NotificationId) || string.IsNullOrEmpty(AccountId)) return;
@@ -594,7 +594,7 @@ public partial class TimelineItemViewModel : ViewModelBase
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task UnbookmarkAsync(CancellationToken ct)
     {
         if (string.IsNullOrEmpty(NotificationId) || string.IsNullOrEmpty(AccountId)) return;
