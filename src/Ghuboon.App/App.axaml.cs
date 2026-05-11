@@ -158,6 +158,7 @@ public partial class App : Application
         // 8. Per-row context for read-state actions.
         var browser = new Browser();
         var clipboard = new AvaloniaClipboard();
+        IBookmarkRepository bookmarks = new BookmarkRepository(dbFactory);
         TimelineItemContext ItemCtxFactory()
         {
             return new TimelineItemContext(
@@ -174,7 +175,8 @@ public partial class App : Application
                     return await credentialStore.GetAsync(account.CredentialKey, ct).ConfigureAwait(false);
                 },
                 OnMarkRead: null,
-                Log: _logger);
+                Log: _logger,
+                Bookmarks: bookmarks);
         }
 
         // 9. Timeline service backed by the event-log cache.
@@ -207,7 +209,9 @@ public partial class App : Application
                 var account = await appSettings.GetPrimaryAccountAsync().ConfigureAwait(false);
                 return account?.Id;
             },
-            settingsViewModel: settingsVm)
+            settingsViewModel: settingsVm,
+            bookmarks: bookmarks,
+            bookmarkAccountId: AppSettingsService.PrimaryAccountId)
         {
             RepositoriesSource = timelineService,
             UiDispatcher = action => Dispatcher.UIThread.Post(action),

@@ -52,10 +52,11 @@ public sealed record TimelineItemContext(
     IClock? Clock,
     Func<CancellationToken, Task<string?>>? PatProvider,
     Action<TimelineItemViewModel>? OnMarkRead,
-    ILogger? Log)
+    ILogger? Log,
+    IBookmarkRepository? Bookmarks = null)
 {
     public static TimelineItemContext Empty { get; } =
-        new(null, null, null, null, null, null, null, null, null);
+        new(null, null, null, null, null, null, null, null, null, null);
 }
 
 /// <summary>
@@ -131,6 +132,15 @@ public partial class TimelineItemViewModel : ViewModelBase
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(RowBackgroundColor))]
     private bool _isRelatedToFocus;
+
+    /// <summary>
+    /// True when the user has bookmarked this thread. Driven by the
+    /// Bookmarks tab filter and the Shift+S / Shift+Cmd+S shortcuts.
+    /// Hydrated from <see cref="IBookmarkRepository"/> on each timeline
+    /// reload so the flag survives sync.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isBookmarked;
 
     /// <summary>
     /// Background tint for the timeline row, in priority order:
@@ -540,6 +550,51 @@ public partial class TimelineItemViewModel : ViewModelBase
             : Id;
         await _ctx.Clipboard.SetTextAsync(label).ConfigureAwait(false);
         FlashMessage = $"Copied event id {label}";
+    }
+
+    /// <summary>
+    /// Bookmark this thread so it shows in the Bookmarks tab. Optimistic:
+    /// we flip <see cref="IsBookmarked"/> on the UI thread first, then
+    /// persist; if the DB write fails we log but don't revert because the
+    /// next reload reads from the DB and reconciles automatically.
+    /// </summary>
+    [RelayCommand]
+    private async Task BookmarkAsync(CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(NotificationId) || string.IsNullOrEmpty(AccountId)) return;
+        if (_ctx.Bookmarks is null) return;
+        if (IsBookmarked) return; // idempotent
+
+        IsBookmarked = true;
+        FlashMessage = "Bookmarked";
+        try
+        {
+            var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
+            await _ctx.Bookmarks.SetAsync(AccountId, NotificationId, now, ct).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _ctx.Log?.Warning(ex, "Persisting bookmark failed for {NotificationId}", NotificationId);
+        }
+    }
+
+    [RelayCommand]
+    private async Task UnbookmarkAsync(CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(NotificationId) || string.IsNullOrEmpty(AccountId)) return;
+        if (_ctx.Bookmarks is null) return;
+        if (!IsBookmarked) return; // idempotent
+
+        IsBookmarked = false;
+        FlashMessage = "Bookmark removed";
+        try
+        {
+            await _ctx.Bookmarks.ClearAsync(AccountId, NotificationId, ct).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _ctx.Log?.Warning(ex, "Clearing bookmark failed for {NotificationId}", NotificationId);
+        }
     }
 
     /// <summary>

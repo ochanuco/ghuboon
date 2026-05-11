@@ -133,6 +133,41 @@ public partial class MainWindow : Window
                 JumpToKind(-1, Core.Domain.NotificationEventKind.PullRequest, Core.Domain.NotificationEventKind.Comment);
                 e.Handled = true;
                 break;
+            // Bookmarks. Shift+S registers the focused row, Shift+Cmd+S
+            // (Shift+Ctrl+S on Windows / Linux) clears it. The MetaKey
+            // modifier in Avalonia maps to Command on macOS and the
+            // Windows key on Windows; KeyModifiers.Control is the Ctrl
+            // key cross-platform, so we accept either as the "clear"
+            // chord per the user's spec.
+            case Key.S when e.KeyModifiers == KeyModifiers.Shift:
+                BookmarkSelected();
+                e.Handled = true;
+                break;
+            case Key.S when e.KeyModifiers == (KeyModifiers.Shift | KeyModifiers.Meta):
+            case Key.S when e.KeyModifiers == (KeyModifiers.Shift | KeyModifiers.Control):
+                UnbookmarkSelected();
+                e.Handled = true;
+                break;
+        }
+    }
+
+    private void BookmarkSelected()
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (vm.Timeline.SelectedItem is not { } item) return;
+        if (item.BookmarkCommand.CanExecute(null))
+        {
+            item.BookmarkCommand.Execute(null);
+        }
+    }
+
+    private void UnbookmarkSelected()
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (vm.Timeline.SelectedItem is not { } item) return;
+        if (item.UnbookmarkCommand.CanExecute(null))
+        {
+            item.UnbookmarkCommand.Execute(null);
         }
     }
 

@@ -22,6 +22,7 @@ namespace Ghuboon.App.ViewModels;
 public partial class MainWindowViewModel : ViewModelBase, IDisposable
 {
     public const string TabAll = "All";
+    public const string TabBookmarks = "Bookmarks";
     public const string TabReview = "Review";
     public const string TabMention = "Mention";
     public const string TabMyPrs = "My PRs";
@@ -92,15 +93,21 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
         INotificationSyncService? syncService,
         IClock? clock,
         Func<Task<string?>>? accountIdProvider,
-        SettingsViewModel? settingsViewModel = null)
+        SettingsViewModel? settingsViewModel = null,
+        Ghuboon.Core.Abstractions.IBookmarkRepository? bookmarks = null,
+        string? bookmarkAccountId = null)
     {
         _appSettings = appSettings;
         _syncService = syncService;
         _clock = clock;
         _accountIdProvider = accountIdProvider;
 
-        Tabs = new[] { TabAll, TabReview, TabMention, TabMyPrs, TabWatching };
-        Timeline = new TimelineViewModel(timelineService);
+        Tabs = new[] { TabAll, TabBookmarks, TabReview, TabMention, TabMyPrs, TabWatching };
+        Timeline = new TimelineViewModel(timelineService)
+        {
+            Bookmarks = bookmarks,
+            BookmarkAccountId = bookmarkAccountId,
+        };
         Settings = settingsViewModel ?? new SettingsViewModel(appSettings);
         Repositories = new List<RepositoryRef>();
 
@@ -298,6 +305,7 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
     {
         var tab = value switch
         {
+            TabBookmarks => TimelineTab.Bookmarks,
             TabReview => TimelineTab.Review,
             TabMention => TimelineTab.Mention,
             TabMyPrs => TimelineTab.MyPrs,

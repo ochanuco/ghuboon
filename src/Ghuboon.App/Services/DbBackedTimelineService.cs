@@ -120,6 +120,10 @@ public sealed class DbBackedTimelineService : ITimelineService
     public static bool MatchesTab(NotificationReason reason, TimelineTab tab) => tab switch
     {
         TimelineTab.All => true,
+        // Bookmarks doesn't filter by reason — IsBookmarked is the gate,
+        // applied per-VM in TimelineViewModel.MatchesFilter. Treat as
+        // pass-through here so the reason check doesn't double-filter.
+        TimelineTab.Bookmarks => true,
         TimelineTab.Review => reason == NotificationReason.Review,
         TimelineTab.Mention => reason is NotificationReason.Mention or NotificationReason.TeamMention,
         TimelineTab.MyPrs => reason == NotificationReason.MyPr,

@@ -26,6 +26,22 @@ public partial class TimelineViewModel : ViewModelBase
     private TimelineFilter _filter = TimelineFilter.Default;
     private CancellationTokenSource? _loadCts;
 
+    /// <summary>
+    /// Optional bookmark repository. Hosted at the VM level so a single
+    /// query per Reload hydrates every TimelineItemViewModel's
+    /// <see cref="TimelineItemViewModel.IsBookmarked"/> flag (cheaper than
+    /// asking per row). Set by the App composition root; null in tests
+    /// keeps the Bookmarks tab empty.
+    /// </summary>
+    public Ghuboon.Core.Abstractions.IBookmarkRepository? Bookmarks { get; init; }
+
+    /// <summary>
+    /// Optional account id whose bookmarks we hydrate. The DbBackedTimelineService
+    /// already pulls events for the primary account, and bookmarks live on
+    /// the same account axis, so we mirror that scope here.
+    /// </summary>
+    public string? BookmarkAccountId { get; init; }
+
     // Master cache: every event row the service returned on the last DB
     // fetch, in display order. Tab / repo / search filter changes operate
     // on this cache in-memory so they no longer round-trip the DB and
@@ -303,6 +319,30 @@ public partial class TimelineViewModel : ViewModelBase
             _allItems.Clear();
             _allItems.AddRange(newAll);
 
+            // Hydrate bookmark flags from the local-state store. A single
+            // query covers every item; we then stamp each VM whose
+            // NotificationId is in the set. Survives across reloads
+            // because the source of truth is the DB.
+            if (Bookmarks is not null && !string.IsNullOrEmpty(BookmarkAccountId))
+            {
+                try
+                {
+                    var bookmarkedIds = await Bookmarks
+                        .GetBookmarkedIdsAsync(BookmarkAccountId!, cts.Token)
+                        .ConfigureAwait(true);
+                    foreach (var item in _allItems)
+                    {
+                        item.IsBookmarked = bookmarkedIds.Contains(item.NotificationId);
+                    }
+                }
+                catch (OperationCanceledException) when (cts.IsCancellationRequested) { throw; }
+                catch
+                {
+                    // Bookmark hydration is non-fatal: timeline still renders,
+                    // the user can re-bookmark.
+                }
+            }
+
             ApplyCurrentFilter();
 
             // Backfill ActorLogin for rows that don't have one persisted yet.
@@ -339,13 +379,53 @@ public partial class TimelineViewModel : ViewModelBase
         var filter = Filter;
         var previouslySelectedId = SelectedItem?.Id;
 
-        Items.Clear();
+        // First pass: gather every matching item in _allItems order
+        // (oldest first, Tween-style).
+        var matched = new List<TimelineItemViewModel>(_allItems.Count);
         foreach (var item in _allItems)
         {
             if (MatchesFilter(item, filter))
             {
-                Items.Add(item);
+                matched.Add(item);
             }
+        }
+
+        // Dedup duplicate observations of the same logical event:
+        //   * Non-Comment kinds (PR / Issue / State / CI / ...) get
+        //     keyed by NotificationId — GitHub bumps updated_at on
+        //     push / CI / state without changing latest_comment_url,
+        //     so each bump appends another event row the EventKind
+        //     classifier reads as PR-mode and the user sees N
+        //     visually-identical rows. Keep the latest one per thread.
+        //   * Comment kind gets keyed by NotificationId +
+        //     LatestCommentApiUrl — the same comment can show up as
+        //     multiple event rows when its parent notification's
+        //     updated_at re-bumps for unrelated activity. Two events
+        //     pointing at the same /comments/{id} are the same logical
+        //     comment, so collapse them too. Distinct comment URLs on
+        //     the same thread (real new comments) survive.
+        // We iterate newest → oldest so the latest event in each
+        // group wins, then reverse for display.
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var coalesced = new List<TimelineItemViewModel>(matched.Count);
+        for (var i = matched.Count - 1; i >= 0; i--)
+        {
+            var item = matched[i];
+            var key = item.EventKind == NotificationEventKind.Comment
+                ? $"C|{item.NotificationId}|{item.LatestCommentApiUrl ?? string.Empty}"
+                : $"T|{item.NotificationId}";
+
+            if (string.IsNullOrEmpty(item.NotificationId) || seen.Add(key))
+            {
+                coalesced.Add(item);
+            }
+        }
+        coalesced.Reverse(); // restore oldest-first display order
+
+        Items.Clear();
+        foreach (var item in coalesced)
+        {
+            Items.Add(item);
         }
         RecomputeAggregates();
 
@@ -378,6 +458,10 @@ public partial class TimelineViewModel : ViewModelBase
         }
         if (filter.Tab == TimelineTab.MyPrs
             && item.EventKind != NotificationEventKind.PullRequest)
+        {
+            return false;
+        }
+        if (filter.Tab == TimelineTab.Bookmarks && !item.IsBookmarked)
         {
             return false;
         }
