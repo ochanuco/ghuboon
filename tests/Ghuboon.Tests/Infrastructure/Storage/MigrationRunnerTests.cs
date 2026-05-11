@@ -15,10 +15,13 @@ public class MigrationRunnerTests
 
         var versions = await connection.QueryAsync<int>(
             "SELECT version FROM _schema_migrations ORDER BY version;");
-        // Migration v3 adds the notification_events table that backs the
-        // event-log timeline; v1 and v2 establish the rest of the schema and
-        // FK constraints; v5 adds the actor_login columns used by the
-        // detail-pane backfill. All five versions land on a fresh open.
+        // Every migration in Migrations.All applies on a fresh open. Pin the
+        // exact sequence so a missing or reordered migration is caught here
+        // before it can ship: v1+v2 = base schema and FKs; v3 adds
+        // notification_events for the event-log timeline; v4 backfills
+        // historical event rows; v5 adds actor_login; v6 adds
+        // latest_comment_url for the EventKind classification; v7 adds the
+        // (account_id, notification_id) index that MarkThreadAsRead leans on.
         Assert.Equal(new[] { 1, 2, 3, 4, 5, 6, 7 }, versions);
 
         var tableNames = (await connection.QueryAsync<string>(

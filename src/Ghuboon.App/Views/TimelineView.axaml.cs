@@ -17,7 +17,20 @@ public partial class TimelineView : UserControl
         InitializeComponent();
         AttachedToVisualTree += OnAttached;
         DetachedFromVisualTree += OnDetached;
-        DataContextChanged += (_, _) => HookItemsCollection();
+        DataContextChanged += OnDataContextChanged;
+    }
+
+    private void OnDataContextChanged(object? sender, System.EventArgs e)
+    {
+        HookItemsCollection();
+        // The DataContext can be replaced AFTER the view is already attached
+        // — typically when the host swaps the TimelineViewModel for a fresh
+        // one that already has Items pre-loaded. CollectionChanged won't
+        // fire in that case (the new collection is handed over fully
+        // populated), so the scroll position would stay at wherever the
+        // previous VM left it. Mirror OnAttached and post a tail-scroll
+        // so the user sees the newest activity without manual input.
+        Dispatcher.UIThread.Post(ScrollToBottom, DispatcherPriority.Background);
     }
 
     private void OnAttached(object? sender, VisualTreeAttachmentEventArgs e)

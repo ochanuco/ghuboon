@@ -137,16 +137,20 @@ public sealed class NotificationEventRepository : INotificationEventRepository
                              -- Tie-break by source_updated_at BEFORE id so a
                              -- v4 backfill that stamps every row with the
                              -- same observed_at still keeps the freshest
-                             -- upstream events inside the window. Without
-                             -- this, source_updated_at-ordered timelines
-                             -- can lose their newest rows when 200+ legacy
-                             -- rows share an observed_at.
-                             ORDER BY datetime(observed_at) DESC,
-                                      datetime(source_updated_at) DESC,
+                             -- upstream events inside the window.
+                             -- strftime('%Y-%m-%dT%H:%M:%fZ', col) preserves
+                             -- millisecond precision (datetime() truncates
+                             -- to whole seconds, which collapses two events
+                             -- in the same second to id-only ordering and
+                             -- can flip the upstream order). The 'utc'
+                             -- modifier normalises mixed-offset legacy rows
+                             -- to a single comparable axis.
+                             ORDER BY strftime('%Y-%m-%dT%H:%M:%fZ', observed_at, 'utc') DESC,
+                                      strftime('%Y-%m-%dT%H:%M:%fZ', source_updated_at, 'utc') DESC,
                                       id DESC
                              LIMIT @limit
                            )
-                           ORDER BY datetime(source_updated_at) ASC, id ASC;
+                           ORDER BY strftime('%Y-%m-%dT%H:%M:%fZ', source_updated_at, 'utc') ASC, id ASC;
                            """;
 
         var rows = await connection.QueryAsync<NotificationEventRow>(new CommandDefinition(
@@ -214,7 +218,10 @@ public sealed class NotificationEventRepository : INotificationEventRepository
                            FROM notification_events
                            WHERE account_id = @accountId
                              AND notification_id = @notificationId
-                           ORDER BY datetime(source_updated_at) DESC
+                           -- strftime preserves millisecond precision (see
+                           -- ListByAccountAsync); two events sharing a
+                           -- second won't collapse to insertion-order here.
+                           ORDER BY strftime('%Y-%m-%dT%H:%M:%fZ', source_updated_at, 'utc') DESC
                            LIMIT 1;
                            """;
 

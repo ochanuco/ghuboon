@@ -74,6 +74,66 @@ public class TimelineItemViewModelTests
     }
 
     [Fact]
+    public async Task MarkAsRead_FlipsSiblingEventRowsForSameThread()
+    {
+        // Issue #58: every existing MarkAsRead test passed
+        // EventRepository: null, so the production call to
+        // INotificationEventRepository.MarkThreadAsReadAsync was never
+        // exercised. Inject a fake event repository carrying two sibling
+        // events on the same (account_id, notification_id) plus an
+        // unrelated one — only the siblings should flip to Unread=false.
+        var repo = new FakeNotificationRepository();
+        var evRepo = new FakeNotificationEventRepository();
+        var api = new FakeApiClient();
+        var clock = new FakeClock();
+
+        var t0 = clock.UtcNow.AddMinutes(-10);
+
+        await evRepo.TryAppendAsync(TimelineTestData.BuildEvent(
+            eventId: 0, id: "primary:1", accountId: "primary",
+            repo: "octocat/hello", title: "PR title",
+            reason: NotificationReason.Mention, unread: true, updatedAt: t0,
+            threadId: "1", webUrl: null));
+        await evRepo.TryAppendAsync(TimelineTestData.BuildEvent(
+            eventId: 0, id: "primary:1", accountId: "primary",
+            repo: "octocat/hello", title: "PR title",
+            reason: NotificationReason.Mention, unread: true, updatedAt: t0.AddMinutes(2),
+            threadId: "1", webUrl: null));
+        await evRepo.TryAppendAsync(TimelineTestData.BuildEvent(
+            eventId: 0, id: "primary:other", accountId: "primary",
+            repo: "octocat/hello", title: "Unrelated",
+            reason: NotificationReason.Mention, unread: true, updatedAt: t0,
+            threadId: "other", webUrl: null));
+
+        var src = TimelineTestData.Build(
+            id: "primary:1", accountId: "primary", repo: "octocat/hello",
+            title: "PR title", reason: NotificationReason.Mention,
+            unread: true, updatedAt: t0,
+            threadId: "1", webUrl: null);
+        var ctx = new TimelineItemContext(
+            Repository: repo,
+            EventRepository: evRepo,
+            Api: api,
+            Browser: new FakeBrowser(),
+            Clipboard: new FakeClipboard(),
+            Clock: clock,
+            PatProvider: _ => Task.FromResult<string?>("pat"),
+            OnMarkRead: null,
+            Log: null);
+        var vm = new TimelineItemViewModel(src, ctx);
+
+        await vm.MarkAsReadCommand.ExecuteAsync(null);
+
+        Assert.Equal(1, evRepo.MarkReadCallCount);
+        var siblings = evRepo.Events.Where(e => e.NotificationId == "primary:1").ToList();
+        Assert.NotEmpty(siblings);
+        Assert.All(siblings, e => Assert.False(e.Unread));
+        // The unrelated thread's row stays untouched.
+        var other = evRepo.Events.Single(e => e.NotificationId == "primary:other");
+        Assert.True(other.Unread);
+    }
+
+    [Fact]
     public async Task OpenInGitHub_AlsoMarksRead_WhenUnread()
     {
         var (vm, _, api, browser, _, _) = BuildVm(unread: true);
