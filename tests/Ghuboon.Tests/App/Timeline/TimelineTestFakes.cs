@@ -297,6 +297,9 @@ internal sealed class FakeApiClient : IGitHubApiClient
 
     public Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndAuthorAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
         => Task.FromResult(GetSubjectBodyAndAuthorOverride?.Invoke(subjectApiUrl) ?? (null, null));
+
+    public Task<(string? Body, string? AuthorLogin, DateTimeOffset? CreatedAt)> GetSubjectMetaAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+        => Task.FromResult<(string?, string?, DateTimeOffset?)>((null, null, null));
 }
 
 internal sealed class FakeBrowser : IBrowserService

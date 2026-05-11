@@ -69,4 +69,18 @@ internal sealed class FakeGitHubApiClient : IGitHubApiClient
 
     public Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndAuthorAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
         => Task.FromResult<(string?, string?)>((null, null));
+
+    /// <summary>
+    /// Default: returns nulls (no synthesis). Tests that exercise the
+    /// PR-anchor synthesis path set <see cref="SubjectMetaOverride"/>.
+    /// </summary>
+    public Func<string, DateTimeOffset?>? SubjectMetaOverride { get; set; }
+    public List<string> SubjectMetaRequests { get; } = new();
+
+    public Task<(string? Body, string? AuthorLogin, DateTimeOffset? CreatedAt)> GetSubjectMetaAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+    {
+        SubjectMetaRequests.Add(subjectApiUrl);
+        var createdAt = SubjectMetaOverride?.Invoke(subjectApiUrl);
+        return Task.FromResult<(string?, string?, DateTimeOffset?)>((null, "parent-author", createdAt));
+    }
 }

@@ -307,6 +307,56 @@ public sealed class GitHubApiClient : IGitHubApiClient
         return await GetSubjectBodyAndUserAsync(pat, subjectApiUrl, ct).ConfigureAwait(false);
     }
 
+    public async Task<(string? Body, string? AuthorLogin, DateTimeOffset? CreatedAt)> GetSubjectMetaAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pat);
+        if (string.IsNullOrWhiteSpace(subjectApiUrl)) return (null, null, null);
+        return await GetSubjectMetaInternalAsync(pat, subjectApiUrl, ct).ConfigureAwait(false);
+    }
+
+    private async Task<(string? Body, string? AuthorLogin, DateTimeOffset? CreatedAt)> GetSubjectMetaInternalAsync(string pat, string subjectApiUrl, CancellationToken ct)
+    {
+        if (!Uri.TryCreate(subjectApiUrl, UriKind.Absolute, out var absolute)) return (null, null, null);
+        if (!IsAllowedAuthHost(absolute))
+        {
+            _log.Warning("GetSubjectMeta rejected non-allowlisted host {Host}", absolute.Host);
+            return (null, null, null);
+        }
+        using var req = new HttpRequestMessage(HttpMethod.Get, absolute);
+        req.Headers.UserAgent.ParseAdd(UserAgent);
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(AcceptMediaType));
+        req.Headers.TryAddWithoutValidation(ApiVersionHeader, ApiVersion);
+        req.Headers.Authorization = new AuthenticationHeaderValue("token", pat);
+        try
+        {
+            using var response = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return (null, null, null);
+            using var doc = await JsonDocument.ParseAsync(
+                await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false),
+                cancellationToken: ct).ConfigureAwait(false);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return (null, null, null);
+            string? body = null, login = null;
+            DateTimeOffset? createdAt = null;
+            if (doc.RootElement.TryGetProperty("body", out var b) && b.ValueKind == JsonValueKind.String) body = b.GetString();
+            if (doc.RootElement.TryGetProperty("user", out var u)
+                && u.ValueKind == JsonValueKind.Object
+                && u.TryGetProperty("login", out var l)
+                && l.ValueKind == JsonValueKind.String)
+            {
+                login = l.GetString();
+            }
+            if (doc.RootElement.TryGetProperty("created_at", out var c)
+                && c.ValueKind == JsonValueKind.String
+                && DateTimeOffset.TryParse(c.GetString(), null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed))
+            {
+                createdAt = parsed;
+            }
+            return (body, login, createdAt);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex) { _log.Information(ex, "GetSubjectMeta failed (non-fatal)"); return (null, null, null); }
+    }
+
     public async Task<(string? Body, string? AuthorLogin)> GetLatestCommentDetailsAsync(string pat, string threadId, CancellationToken ct = default)
     {
         var commentUrl = await GetThreadSubjectFieldAsync(pat, threadId, "latest_comment_url", ct).ConfigureAwait(false);

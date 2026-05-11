@@ -452,6 +452,71 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                     updatedCount++;
                 }
 
+                // PR-anchor synthesis: GitHub's /notifications endpoint
+                // collapses a thread's history into a single "latest
+                // state" entry, so if we first observe a thread after a
+                // comment was already posted on it, we never see the
+                // pure PR-only state — the timeline shows a lone
+                // Comment row with no parent. To restore the parent's
+                // anchor row, fetch the subject (PR/Issue/Discussion)
+                // once on the first observation of a Comment-kind
+                // thread and synthesize a parent-kind event row dated
+                // at the subject's created_at.
+                //
+                // Synthetic events do NOT enter highPriorityNew —
+                // historical state shouldn't fire OS banners.
+                if (isNew
+                    && eventAppended
+                    && newKind == NotificationEventKind.Comment
+                    && !string.IsNullOrEmpty(notification.Subject.ApiUrl)
+                    && !string.IsNullOrEmpty(pat))
+                {
+                    try
+                    {
+                        var (_, parentAuthor, parentCreatedAt) = await _apiClient
+                            .GetSubjectMetaAsync(pat, notification.Subject.ApiUrl!, ct)
+                            .ConfigureAwait(false);
+
+                        if (parentCreatedAt is not null)
+                        {
+                            // Clear LatestCommentApiUrl so Kind classifies as
+                            // PullRequest/Issue/Discussion rather than Comment.
+                            var parentSubject = notification.Subject with { LatestCommentApiUrl = null };
+                            var parentSnapshot = new NotificationEvent(
+                                Id: 0,
+                                AccountId: notification.AccountId,
+                                NotificationId: notification.Id,
+                                ThreadId: notification.ThreadId,
+                                RepositoryFullName: notification.RepositoryFullName,
+                                Subject: parentSubject,
+                                Reason: notification.Reason,
+                                SourceUpdatedAt: parentCreatedAt.Value,
+                                ObservedAt: now,
+                                Unread: notification.Unread,
+                                LastReadAt: notification.LastReadAt,
+                                RawJson: rawJson,
+                                ActorLogin: string.IsNullOrEmpty(parentAuthor) ? actorLogin : parentAuthor);
+                            var parentAppended = await _eventRepository
+                                .TryAppendAsync(parentSnapshot, ct)
+                                .ConfigureAwait(false);
+                            _logger?.Information(
+                                "sync.synthesizeParent id={NotificationId} parentKind={Kind} createdAt={CreatedAt:O} appended={Appended}",
+                                notification.Id,
+                                parentSubject.Kind,
+                                parentCreatedAt.Value,
+                                parentAppended);
+                        }
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.Information(ex, "PR-anchor synthesis failed for {NotificationId} (non-fatal)", notification.Id);
+                    }
+                }
+
                 // OS-banner trigger: any newly-observed event (new thread OR
                 // existing thread with a fresh source_updated_at) deserves a
                 // banner if the reason is high-priority. Old events that

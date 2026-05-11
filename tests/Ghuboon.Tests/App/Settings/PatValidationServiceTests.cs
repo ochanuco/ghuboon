@@ -93,5 +93,8 @@ public class PatValidationServiceTests
 
         public Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndAuthorAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
             => throw new NotImplementedException();
+
+        public Task<(string? Body, string? AuthorLogin, DateTimeOffset? CreatedAt)> GetSubjectMetaAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+            => throw new NotImplementedException();
     }
 }

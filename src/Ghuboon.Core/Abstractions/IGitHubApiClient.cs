@@ -71,6 +71,18 @@ public interface IGitHubApiClient
     /// a previously-persisted commenter actor.
     /// </summary>
     Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndAuthorAsync(string pat, string subjectApiUrl, CancellationToken ct = default);
+
+    /// <summary>
+    /// Fetch the parent subject's metadata used to synthesize a PR-anchor
+    /// timeline row when the very first observation of a notification
+    /// thread arrived as a Comment kind. Returns the subject's body,
+    /// creator login, AND created_at (the moment the PR/Issue/Discussion
+    /// was opened upstream). Used by NotificationSyncService.SyncAsync to
+    /// give the TL a parent-kind anchor row even though /notifications
+    /// only ever surfaces a thread's latest state. Returns nulls on any
+    /// failure — the caller treats the synthesis as best-effort.
+    /// </summary>
+    Task<(string? Body, string? AuthorLogin, DateTimeOffset? CreatedAt)> GetSubjectMetaAsync(string pat, string subjectApiUrl, CancellationToken ct = default);
 }
 
 /// <summary>
