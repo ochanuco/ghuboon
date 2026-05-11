@@ -26,10 +26,14 @@ public class TimelineFilterTests
         var c = a;
         Assert.Equal(a, c);
         Assert.Equal(a.GetHashCode(), c.GetHashCode());
-        // The independently-allocated b has the same field VALUES but a
-        // different set reference, which is the documented record-equality
-        // limitation we accept here (callers should reuse instances).
-        _ = b;
+
+        // Two independently-allocated filters with the same field VALUES
+        // but distinct set references are NOT equal — that's the
+        // documented record-equality limitation we accept. Callers should
+        // reuse instances when they want equality. Pin the limitation
+        // here so a future change to "deep-equality for collections"
+        // doesn't silently flip the contract.
+        Assert.NotEqual(a, b);
     }
 
     [Fact]

@@ -37,24 +37,6 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
     /// <summary>30-day cache retention (ADR-022).</summary>
     public static readonly TimeSpan CacheRetention = TimeSpan.FromDays(30);
 
-    // Reasons that emit a NewNotifications event for the OS-banner pipeline.
-    // Must stay aligned with HighPriorityNotificationGate's allow-list — when
-    // they drift, sync drops events on the floor before the gate ever sees
-    // them, which is exactly how a previous regression silenced
-    // MyPr/State/Comment banners. The gate is the final filter; this set
-    // exists only as an upstream cost-cut so we don't fire the event at all
-    // for low-signal reasons (Watching, CiActivity, ...).
-    private static readonly HashSet<NotificationReason> HighPriorityReasons = new()
-    {
-        NotificationReason.Review,
-        NotificationReason.Mention,
-        NotificationReason.TeamMention,
-        NotificationReason.Assigned,
-        NotificationReason.MyPr,
-        NotificationReason.State,
-        NotificationReason.Comment,
-    };
-
     private static readonly JsonSerializerOptions RawJsonOptions = new()
     {
         WriteIndented = false,
@@ -419,7 +401,7 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 // the very first sync (LastSuccessfulSyncAt is null and
                 // hasPriorSync gates the whole event upstream anyway).
                 if (eventAppended
-                    && HighPriorityReasons.Contains(notification.Reason)
+                    && HighPriorityNotificationReasons.Contains(notification.Reason)
                     && (state.LastSuccessfulSyncAt is null
                         || notification.UpdatedAt > state.LastSuccessfulSyncAt))
                 {

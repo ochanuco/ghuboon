@@ -396,55 +396,70 @@ public partial class TimelineItemViewModel : ViewModelBase
         // the network call finishes (so a rapid second click is still
         // suppressed via the in-flight slot) without making the user wait
         // for the visible state.
-        Unread = false;
-        FlashMessage = null;
-        _ctx.OnMarkRead?.Invoke(this);
-
         try
         {
             var pat = _ctx.PatProvider is null ? null : await _ctx.PatProvider(ct).ConfigureAwait(true);
             var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
 
+            // Only flip optimistically when we can also push the change
+            // upstream. Without a working PAT / API / ThreadId the local
+            // cache would drift ahead of GitHub's actual state and stay
+            // marked-read even though we never PATCH'd /notifications, so
+            // the next sync would either reopen the row or leave the user
+            // wondering why their fix never landed. CR feedback: don't
+            // start the optimistic update when upstream isn't reachable.
+            var canPushUpstream = _ctx.Api is not null
+                && !string.IsNullOrEmpty(pat)
+                && !string.IsNullOrEmpty(ThreadId);
+
+            if (canPushUpstream)
+            {
+                Unread = false;
+                FlashMessage = null;
+                _ctx.OnMarkRead?.Invoke(this);
+            }
+            else
+            {
+                _ctx.Log?.Information("Mark-as-read skipped: missing PAT / Api / ThreadId for {NotificationId}", NotificationId);
+                FlashMessage = "Sign in to mark read on GitHub; local state unchanged.";
+                return;
+            }
+
             // API first — if it fails, revert the optimistic flip and skip
             // local DB writes so the cache stays in sync with the (still-
             // unread) upstream state. ADR-014: read-sync failures degrade
             // gracefully; the next sync will reconcile.
-            if (_ctx.Api is not null && !string.IsNullOrEmpty(pat) && !string.IsNullOrEmpty(ThreadId))
+            try
             {
-                try
-                {
-                    await _ctx.Api.MarkThreadReadAsync(pat, ThreadId, ct).ConfigureAwait(true);
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    _ctx.Log?.Warning(ex, "Mark-as-read API call failed for {ThreadId}", ThreadId);
-                    Unread = true;
-                    FlashMessage = "Read sync failed; will retry on next sync.";
-                    return;
-                }
+                await _ctx.Api!.MarkThreadReadAsync(pat!, ThreadId, ct).ConfigureAwait(true);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _ctx.Log?.Warning(ex, "Mark-as-read API call failed for {ThreadId}", ThreadId);
+                Unread = true;
+                FlashMessage = "Read sync failed; will retry on next sync.";
+                return;
             }
 
             // DB writes run in parallel because they're independent paths
             // (notifications row vs event-log siblings) and we've already
             // confirmed upstream success.
+            //
+            // Use the targeted SetReadStateAsync so only `unread` and
+            // `last_read_at` are touched; the previous full UpsertAsync
+            // rebuild had stripped subject_api_url / latest_comment_url /
+            // raw_json to nulls and broken the body fetch + Kind
+            // classification on the next render.
             Task notifTask = Task.CompletedTask;
-            if (_ctx.Repository is not null && !string.IsNullOrEmpty(NotificationId) && !string.IsNullOrEmpty(AccountId))
+            if (_ctx.Repository is not null && !string.IsNullOrEmpty(NotificationId))
             {
-                var updated = new GitHubNotification(
-                    NotificationId,
-                    AccountId,
-                    ThreadId,
-                    RepositoryFullName,
-                    new NotificationSubject(SubjectType, Title, null, WebUrl),
-                    Reason,
-                    Unread: false,
-                    UpdatedAt,
-                    LastReadAt: now);
-                notifTask = SwallowAsync(_ctx.Repository.UpsertAsync(updated, string.Empty, now, ct), "Persisting local read state failed for " + NotificationId);
+                notifTask = SwallowAsync(
+                    _ctx.Repository.SetReadStateAsync(NotificationId, unread: false, readAt: now, ct),
+                    "Persisting local read state failed for " + NotificationId);
             }
 
             Task eventTask = Task.CompletedTask;

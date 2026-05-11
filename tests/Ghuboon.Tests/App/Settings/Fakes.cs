@@ -80,6 +80,9 @@ internal sealed class FakeNotificationRepository : INotificationRepository
 
     public Task<int> SetActorLoginAsync(string id, string actorLogin, CancellationToken ct = default)
         => Task.FromResult(0);
+
+    public Task<int> SetReadStateAsync(string id, bool unread, DateTimeOffset readAt, CancellationToken ct = default)
+        => Task.FromResult(0);
 }
 
 internal sealed class FakeGitHubApiClient : IGitHubApiClient

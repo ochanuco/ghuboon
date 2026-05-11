@@ -134,6 +134,17 @@ internal sealed class InMemoryNotificationRepository : INotificationRepository
         return Task.FromResult(1);
     }
 
+    public Task<int> SetReadStateAsync(string id, bool unread, DateTimeOffset readAt, CancellationToken ct = default)
+    {
+        if (!_notifs.TryGetValue(id, out var entry))
+        {
+            return Task.FromResult(0);
+        }
+        var updated = entry.Notification with { Unread = unread, LastReadAt = readAt };
+        _notifs[id] = entry with { Notification = updated };
+        return Task.FromResult(1);
+    }
+
     public int Count => _notifs.Count;
 
     public void SeedWithSyncedAt(GitHubNotification notification, DateTimeOffset syncedAt)

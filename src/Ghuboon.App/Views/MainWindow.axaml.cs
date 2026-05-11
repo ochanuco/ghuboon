@@ -299,17 +299,14 @@ public partial class MainWindow : Window
             {
                 continue;
             }
-            for (var k = 0; k < kinds.Length; k++)
+            if (System.Array.IndexOf(kinds, item.EventKind) >= 0)
             {
-                if (item.EventKind == kinds[k])
-                {
-                    vm.Timeline.SelectedItem = item;
-                    var list = this.GetVisualDescendants()
-                        .OfType<ListBox>()
-                        .FirstOrDefault(b => b.Name == "ItemsList");
-                    list?.ScrollIntoView(item);
-                    return;
-                }
+                vm.Timeline.SelectedItem = item;
+                var list = this.GetVisualDescendants()
+                    .OfType<ListBox>()
+                    .FirstOrDefault(b => b.Name == "ItemsList");
+                list?.ScrollIntoView(item);
+                return;
             }
         }
     }

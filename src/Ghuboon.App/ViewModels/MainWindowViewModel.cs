@@ -182,6 +182,14 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
         }
 
         OnPropertyChanged(nameof(RepositoryFilterLabel));
+
+        // Re-apply the filter against the freshly-rebuilt selection set so
+        // the timeline stays in sync with the dropdown's label. A repo
+        // that was previously ticked but no longer appears in the new
+        // Repositories list (pruned upstream, account swap) used to leave
+        // a stale name in the active filter while the dropdown read
+        // "All repos" — the visible UI lied about what was being filtered.
+        ApplyRepositoryFilter();
     }
 
     private void OnRepositoryFilterChanged(object? sender, PropertyChangedEventArgs e)

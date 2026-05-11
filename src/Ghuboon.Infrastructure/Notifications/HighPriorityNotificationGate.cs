@@ -11,23 +11,11 @@ namespace Ghuboon.Infrastructure.Notifications;
 /// </summary>
 public sealed class HighPriorityNotificationGate : IDesktopNotificationGate
 {
-    // OS-banner reasons. The PLAN.md baseline keeps to the high-signal four
-    // (Review/Mention/TeamMention/Assigned). User-driven additions: MyPr and
-    // State surface authored-PR activity and Draft ⇄ Open toggles; Comment
-    // surfaces every PR/Issue comment so the user can read replies without
-    // tabbing back. Subscribed / Watching / CiActivity remain suppressed
-    // because they are noisy (release bots, dependabot, periodic CI runs).
-    private static readonly IReadOnlySet<NotificationReason> HighPriorityReasons =
-        new HashSet<NotificationReason>
-        {
-            NotificationReason.Review,
-            NotificationReason.Mention,
-            NotificationReason.TeamMention,
-            NotificationReason.Assigned,
-            NotificationReason.MyPr,
-            NotificationReason.State,
-            NotificationReason.Comment,
-        };
+    // OS-banner allow-list. Sourced from
+    // Ghuboon.Core.Domain.HighPriorityNotificationReasons so the gate's
+    // downstream filter and NotificationSyncService's upstream filter
+    // share a single definition. They drifted once and silenced
+    // MyPr / State / Comment banners for a release.
 
     private readonly LastNotifiedTracker _tracker;
     private readonly IClock _clock;
@@ -62,7 +50,7 @@ public sealed class HighPriorityNotificationGate : IDesktopNotificationGate
         {
             ct.ThrowIfCancellationRequested();
 
-            if (!HighPriorityReasons.Contains(candidate.Reason))
+            if (!HighPriorityNotificationReasons.Contains(candidate.Reason))
             {
                 continue;
             }

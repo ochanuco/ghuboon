@@ -255,7 +255,17 @@ public partial class TimelineViewModel : ViewModelBase
             // request so the VM holds every row the service can offer.
             // Filtering then happens in ApplyCurrentFilter() against this
             // cache without hitting the DB on each tab / repo change.
-            var events = await _timelineService.LoadAsync(TimelineFilter.Default, cts.Token).ConfigureAwait(false);
+            // ConfigureAwait(true) so the continuation runs back on the
+            // caller's SynchronizationContext (Avalonia's UI thread in
+            // production, none in unit tests). Items.Clear() / Items.Add()
+            // below mutate an ObservableCollection bound to the UI, which
+            // Avalonia only accepts on the UI thread. Production callers
+            // are already expected to invoke ReloadAsync from the UI
+            // thread (see comment on the foreach below); this guard
+            // protects against an off-thread resumption when the
+            // underlying service awaits something that completes on the
+            // thread pool.
+            var events = await _timelineService.LoadAsync(TimelineFilter.Default, cts.Token).ConfigureAwait(true);
 
             // Reuse existing VMs by stable Id where possible — the Body /
             // BodyAuthorLogin / Unread state on a kept VM survives a Sync,

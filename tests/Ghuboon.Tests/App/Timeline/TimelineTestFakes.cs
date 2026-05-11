@@ -61,6 +61,14 @@ internal sealed class FakeNotificationRepository : INotificationRepository
         Notifications[idx] = Notifications[idx] with { ActorLogin = actorLogin };
         return Task.FromResult(1);
     }
+
+    public Task<int> SetReadStateAsync(string id, bool unread, DateTimeOffset readAt, CancellationToken ct = default)
+    {
+        var idx = Notifications.FindIndex(n => n.Id == id);
+        if (idx < 0) return Task.FromResult(0);
+        Notifications[idx] = Notifications[idx] with { Unread = unread, LastReadAt = readAt };
+        return Task.FromResult(1);
+    }
 }
 
 /// <summary>
