@@ -337,14 +337,40 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 //   * the notification's Kind has changed since the last
                 //     observation (the prior commenter no longer represents
                 //     the new event row's content).
+                //
+                // AND we additionally gate on "this observation will append
+                // a new event row" (updated_at moved forward). Without this
+                // gate the per-sync foreach blocked ~1.5 s per row on an
+                // actor API call even when no new event was going to be
+                // appended — turning a 35-thread sync into a 50-60 s pass
+                // and pushing the NewNotifications-driven banners that far
+                // behind the upstream activity. Diagnosed from the
+                // observed comment→PR banner gap (~70 s).
+                // Gate the EXPENSIVE actor lookup on "will this observation
+                // likely produce a new event row?" — i.e., upstream's
+                // UpdatedAt has moved forward (or we've never seen this
+                // notification). Without this gate the foreach blocked
+                // ~1.5 s per row on an API call even when the unique index
+                // was about to dedup the event anyway, turning a
+                // 35-thread sync into a 50–60 s pass and pushing the
+                // NewNotifications-driven banner stream that far behind
+                // the upstream activity. Diagnosed from a ~70 s
+                // comment→PR banner gap in production logs.
+                //
+                // TryAppendAsync still runs unconditionally below: the
+                // unique index is the source of truth for dedup, this
+                // gate is purely an actor-API short-circuit.
                 var existingKind = existing?.Subject.Kind;
                 var newKind = notification.Subject.Kind;
-                var needsActorLookup = existing is null
-                    || string.IsNullOrEmpty(existing.ActorLogin)
-                    || existingKind != newKind;
+                var willAppendNewEvent = existing is null
+                    || existing.UpdatedAt != notification.UpdatedAt;
+                var needsActorLookup = willAppendNewEvent
+                    && (existing is null
+                        || string.IsNullOrEmpty(existing.ActorLogin)
+                        || existingKind != newKind);
                 var actorLogin = needsActorLookup
                     ? await ResolveActorLoginAsync(pat, notification, ct).ConfigureAwait(false)
-                    : existing!.ActorLogin;
+                    : existing?.ActorLogin;
 
                 var snapshot = new NotificationEvent(
                     Id: 0,
@@ -417,8 +443,21 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 // suddenly appear" UX bug. We still let them through on
                 // the very first sync (LastSuccessfulSyncAt is null and
                 // hasPriorSync gates the whole event upstream anyway).
+                // Gate: skip banners for re-surfaced OLD events whose
+                // upstream UpdatedAt predates our last successful sync
+                // (they're not new from the user's perspective). EXCEPT:
+                //   * first-ever sync (LastSuccessfulSyncAt is null) —
+                //     hasPriorSync gates the outer event anyway.
+                //   * isNew (we've never seen this notification before)
+                //     — without this, sub-second clock skew between
+                //     GitHub's whole-second UpdatedAt and our sub-second
+                //     LastSuccessfulSyncAt was suppressing legitimate
+                //     brand-new notifications. Observed in the field:
+                //     notif.UpdatedAt=14:03:59.000 vs lastSuccess=
+                //     14:03:59.483 silently dropped the banner.
                 var highPriority = HighPriorityNotificationReasons.Contains(notification.Reason);
                 var gatePassed = state.LastSuccessfulSyncAt is null
+                    || isNew
                     || notification.UpdatedAt > state.LastSuccessfulSyncAt;
                 var bannerEligible = eventAppended && highPriority && gatePassed;
                 if (bannerEligible)
