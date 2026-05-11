@@ -103,8 +103,17 @@ public partial class App : Application
         var syncStateRepo = new SyncStateRepository(dbFactory);
         var settingsRepo = new AppSettingsRepository(dbFactory);
 
-        // 4. HttpClient + GitHub API client.
-        _httpClient = new HttpClient();
+        // 4. HttpClient + GitHub API client. Default Timeout is 100 s
+        // which is way too long for any single request in our foreach
+        // (sync's per-iter actor lookup, PR-anchor synthesis, body
+        // fetch on row click). A slow GitHub response would otherwise
+        // hold the sync gate for minutes. 15 s is well above the
+        // p99 of /pulls/{n} / /comments/{id} and short enough that a
+        // network stall recovers in the next poll cycle.
+        _httpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(15),
+        };
         _logger = GhuboonLogger.Create();
         var apiClient = new GitHubApiClient(_httpClient, _logger);
 
