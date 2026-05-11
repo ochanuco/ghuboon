@@ -28,6 +28,14 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private bool _migrationsApplied;
 
+    // Cache the resolved DB key in memory so we don't shell out to the
+    // macOS `security` tool on EVERY connection open. Each spawn is
+    // ~50-100 ms, and the sync foreach opens 3 connections per row
+    // (GetById / Upsert / TryAppend), which compounded to ~2 s per
+    // observation in production logs and pushed the whole sync past
+    // the 60 s poll interval.
+    private string? _cachedKey;
+
     /// <summary>
     /// Production constructor: uses the platform default DB path under the
     /// app data directory.
@@ -73,7 +81,15 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
             DataSource = _databasePath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Default,
-            Pooling = false,
+            // Pool physical connections. Each OpenAsync would otherwise
+            // build a fresh SQLite handle, run PRAGMA key (PBKDF2 key
+            // derivation, ~100 ms), then dispose on the repo op finish.
+            // Microsoft.Data.Sqlite's pool preserves connection state
+            // across reuse, so subsequent opens get an already-keyed
+            // connection and skip the PBKDF2 cost. The sync foreach
+            // opens 3 connections per row; with 35 rows the savings
+            // are ~10 s per pass.
+            Pooling = true,
         }.ToString();
 
         var connection = new SqliteConnection(connectionString);
@@ -120,16 +136,40 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
 
     private async Task<string> ResolveOrCreateKeyAsync(CancellationToken ct)
     {
-        var existing = await _credentialStore.GetAsync(_credentialKey, ct).ConfigureAwait(false);
-        if (!string.IsNullOrEmpty(existing))
+        // Memory-cache the key after first resolution. The credential
+        // store backs onto the macOS `security` CLI in production, which
+        // is a process spawn per call (~50-100 ms). Caching turns the
+        // per-connection fetch into a field read.
+        if (_cachedKey is not null)
         {
-            return existing;
+            return _cachedKey;
         }
 
-        var bytes = RandomNumberGenerator.GetBytes(32);
-        var encoded = Convert.ToBase64String(bytes);
-        await _credentialStore.SetAsync(_credentialKey, encoded, ct).ConfigureAwait(false);
-        return encoded;
+        await _initLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_cachedKey is not null)
+            {
+                return _cachedKey;
+            }
+
+            var existing = await _credentialStore.GetAsync(_credentialKey, ct).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(existing))
+            {
+                _cachedKey = existing;
+                return existing;
+            }
+
+            var bytes = RandomNumberGenerator.GetBytes(32);
+            var encoded = Convert.ToBase64String(bytes);
+            await _credentialStore.SetAsync(_credentialKey, encoded, ct).ConfigureAwait(false);
+            _cachedKey = encoded;
+            return encoded;
+        }
+        finally
+        {
+            _initLock.Release();
+        }
     }
 
     private static async Task ApplyEncryptionPragmasAsync(DbConnection connection, string key, CancellationToken ct)
