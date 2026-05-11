@@ -195,6 +195,29 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
         await connection.ExecuteAsync(new CommandDefinition(
             "PRAGMA foreign_keys = ON;",
             cancellationToken: ct)).ConfigureAwait(false);
+
+        // Switch the database to WAL so the UI mark-read path (writer)
+        // can run concurrently with the sync foreach (writer/reader)
+        // and TL reload (reader) without producing "database is
+        // locked" SqliteExceptions. journal_mode is a DB-level setting
+        // that persists across connections, so this is effectively a
+        // first-open cost; we issue it every open anyway because the
+        // pragma is harmless when WAL is already active and we don't
+        // want a one-shot init path that could be skipped under
+        // pooling.
+        await connection.ExecuteAsync(new CommandDefinition(
+            "PRAGMA journal_mode = WAL;",
+            cancellationToken: ct)).ConfigureAwait(false);
+
+        // busy_timeout is per-connection: when a writer holds the lock,
+        // other connections that try to write will wait up to 5 s
+        // (SQLite retries internally) instead of failing immediately.
+        // Combined with WAL this turns the previous "database is
+        // locked" crashes from the foreach vs. mark-read race into a
+        // brief block until the prior write commits.
+        await connection.ExecuteAsync(new CommandDefinition(
+            "PRAGMA busy_timeout = 5000;",
+            cancellationToken: ct)).ConfigureAwait(false);
     }
 
     private static void EnsureDirectoryExists(string path)
