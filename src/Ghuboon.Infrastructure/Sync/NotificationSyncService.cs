@@ -557,7 +557,12 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 // SourceUpdatedAt much earlier than now) vs. the stale-
                 // event banner suppression gate misfiring (gatePassed=
                 // false on a row the user actually wants bannered).
-                _logger?.Information(
+                // Debug level: one line per notification per sync gets
+                // noisy in production (35 lines / minute on a busy
+                // account). Use Debug so the sink can be silenced without
+                // changing this code; raise to Information only when
+                // actively investigating delivery skew.
+                _logger?.Debug(
                     "sync.observe id={NotificationId} thread={ThreadId} reason={Reason} kind={Kind} " +
                     "src.updatedAt={SourceUpdatedAt:O} observedAt={ObservedAt:O} deliveryLagSec={DeliveryLagSec:F1} " +
                     "lastSuccessAt={LastSuccessfulSyncAt:O} isNew={IsNew} eventAppended={EventAppended} " +
@@ -735,6 +740,10 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
     public void Dispose()
     {
         Stop();
+        // Dispose the serialization gate after Stop() has joined the
+        // background loop; at that point no callers can still be
+        // awaiting it.
+        _syncGate.Dispose();
     }
 
     private async Task RunBackgroundLoopAsync(CancellationToken ct)

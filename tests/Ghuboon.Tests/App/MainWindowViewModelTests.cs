@@ -64,6 +64,10 @@ public class MainWindowViewModelTests
             if (condition()) return;
             await Task.Delay(20).ConfigureAwait(false);
         }
+        // Throw instead of silently returning so a test that depends on
+        // the condition fails loudly with "timed out" rather than
+        // continuing to a misleading assertion failure on the next line.
+        throw new TimeoutException($"WaitUntil condition not satisfied within {timeout.TotalMilliseconds:F0} ms");
     }
 
     [Fact]

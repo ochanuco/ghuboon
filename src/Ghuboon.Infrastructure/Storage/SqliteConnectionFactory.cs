@@ -81,14 +81,13 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
             DataSource = _databasePath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Default,
-            // Pool physical connections. Each OpenAsync would otherwise
-            // build a fresh SQLite handle, run PRAGMA key (PBKDF2 key
-            // derivation, ~100 ms), then dispose on the repo op finish.
-            // Microsoft.Data.Sqlite's pool preserves connection state
-            // across reuse, so subsequent opens get an already-keyed
-            // connection and skip the PBKDF2 cost. The sync foreach
-            // opens 3 connections per row; with 35 rows the savings
-            // are ~10 s per pass.
+            // Microsoft.Data.Sqlite pools physical connections by
+            // default (Pooling=true). Set it explicitly here so the
+            // contract is visible at the callsite: the sync foreach
+            // opens 3 connections per row and each fresh SQLite
+            // handle would run PRAGMA key (PBKDF2 key derivation,
+            // ~100 ms), so pool-reuse avoids ~10 s per pass on a
+            // 35-row account.
             Pooling = true,
         }.ToString();
 

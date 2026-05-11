@@ -67,9 +67,27 @@ public partial class MainWindow : Window
     private void OnWindowClosing(object? sender, Avalonia.Controls.WindowClosingEventArgs e)
     {
         if (DataContext is not MainWindowViewModel vm) return;
-        // Synchronous-style fire so the save lands before process exit;
-        // SetAsync is fast (a single SQLite UPSERT).
-        _ = vm.SaveWindowBoundsAsync(Position.X, Position.Y, Width, Height);
+
+        // Cancel + dispose the pending debounce so the background task
+        // we kicked off on the last drag doesn't race the final save
+        // below. Without this the 600 ms delay could fire after we
+        // already wrote the closing bounds and clobber them with stale
+        // capturedPos / capturedW / capturedH values.
+        var pending = _boundsSaveCts;
+        _boundsSaveCts = null;
+        pending?.Cancel();
+        pending?.Dispose();
+
+        // Final save must complete before process exit so the next
+        // launch picks up the actual closing bounds, not the last
+        // mid-drag snapshot. SetAsync is a single SQLite UPSERT
+        // (sub-ms with our connection-pool warm path).
+        try
+        {
+            vm.SaveWindowBoundsAsync(Position.X, Position.Y, Width, Height)
+                .GetAwaiter().GetResult();
+        }
+        catch { /* best-effort; we're already shutting down */ }
     }
 
     private void ScheduleSaveBounds()

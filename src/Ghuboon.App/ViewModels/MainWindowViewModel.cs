@@ -134,12 +134,23 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
         {
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(3), cts.Token).ConfigureAwait(false);
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(3), cts.Token).ConfigureAwait(false);
+                }
+                catch (TaskCanceledException) { return; }
+                if (cts.IsCancellationRequested) return;
+                void Clear() { if (ReferenceEquals(_flashCts, cts)) FlashText = null; }
+                if (UiDispatcher is { } d) d(Clear); else Clear();
             }
-            catch (TaskCanceledException) { return; }
-            if (cts.IsCancellationRequested) return;
-            void Clear() { if (ReferenceEquals(_flashCts, cts)) FlashText = null; }
-            if (UiDispatcher is { } d) d(Clear); else Clear();
+            finally
+            {
+                // Dispose this iteration's CTS so we don't leak one per
+                // flash. If we're still the current _flashCts (no later
+                // ShowFlash call replaced us), null the field too.
+                if (ReferenceEquals(_flashCts, cts)) _flashCts = null;
+                cts.Dispose();
+            }
         });
     }
 
