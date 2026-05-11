@@ -209,10 +209,14 @@ public class TimelineViewModelTests
             }
             // Match the production OUTER ORDER from
             // DbBackedTimelineService.LoadAsync: rows sorted ASC by
-            // SourceUpdatedAt (Tween-style — newest at the bottom). The
-            // previous DESC sort masked ordering regressions because tests
-            // could pass under either direction.
-            return Task.FromResult<IReadOnlyList<NotificationEvent>>(q.OrderBy(n => n.SourceUpdatedAt).ToList());
+            // SourceUpdatedAt (Tween-style — newest at the bottom).
+            // Use Id as a deterministic tie-break to match the SQL
+            // "ORDER BY source_updated_at ASC, id ASC", so two events
+            // sharing a timestamp keep the same relative order the
+            // production query would emit. The previous DESC sort masked
+            // regressions because tests could pass under either direction.
+            return Task.FromResult<IReadOnlyList<NotificationEvent>>(
+                q.OrderBy(n => n.SourceUpdatedAt).ThenBy(n => n.Id).ToList());
         }
 
         public Task<IReadOnlyList<RepositoryRef>> ListRepositoriesAsync(CancellationToken ct = default)
