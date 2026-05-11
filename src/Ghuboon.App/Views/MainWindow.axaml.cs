@@ -9,6 +9,20 @@ namespace Ghuboon.App.Views;
 
 public partial class MainWindow : Window
 {
+    // Cache the timeline ListBox / detail ScrollViewer so hot-path key
+    // handlers don't rescan the visual tree on every press. The window
+    // template is stable, so a single lookup on first use is enough.
+    private ListBox? _timelineList;
+    private ScrollViewer? _detailScroll;
+
+    private ListBox? TimelineList()
+        => _timelineList ??= this.GetVisualDescendants()
+            .OfType<ListBox>()
+            .FirstOrDefault(b => b.Name == "ItemsList");
+
+    private ScrollViewer? DetailScroll()
+        => _detailScroll ??= this.FindControl<ScrollViewer>("DetailScrollViewer");
+
     public MainWindow()
     {
         InitializeComponent();
@@ -175,22 +189,18 @@ public partial class MainWindow : Window
 
     private void FocusTimeline()
     {
-        var list = this.GetVisualDescendants()
-            .OfType<ListBox>()
-            .FirstOrDefault(b => b.Name == "ItemsList");
-        list?.Focus();
+        TimelineList()?.Focus();
     }
 
     private void FocusDetail()
     {
-        var scroll = this.FindControl<ScrollViewer>("DetailScrollViewer");
-        scroll?.Focus();
+        DetailScroll()?.Focus();
     }
 
     private bool IsDetailFocused()
     {
         var focused = FocusManager?.GetFocusedElement() as Avalonia.Visual;
-        var scroll = this.FindControl<ScrollViewer>("DetailScrollViewer");
+        var scroll = DetailScroll();
         if (scroll is null || focused is null)
         {
             return false;
@@ -205,7 +215,7 @@ public partial class MainWindow : Window
 
     private void ScrollDetail(int direction)
     {
-        var scroll = this.FindControl<ScrollViewer>("DetailScrollViewer");
+        var scroll = DetailScroll();
         if (scroll is null)
         {
             return;
@@ -257,9 +267,7 @@ public partial class MainWindow : Window
         // subsequent Up/Down arrow presses route here too rather than
         // triggering Avalonia's directional focus traversal (which used
         // to land on the repo-filter toggle from the toolbar).
-        var list = this.GetVisualDescendants()
-            .OfType<ListBox>()
-            .FirstOrDefault(b => b.Name == "ItemsList");
+        var list = TimelineList();
         list?.ScrollIntoView(items[next]);
         list?.Focus();
     }
@@ -289,9 +297,7 @@ public partial class MainWindow : Window
                      ?? items[^1];
         vm.Timeline.SelectedItem = target;
 
-        var list = this.GetVisualDescendants()
-            .OfType<ListBox>()
-            .FirstOrDefault(b => b.Name == "ItemsList");
+        var list = TimelineList();
         list?.ScrollIntoView(target);
         list?.Focus();
     }
@@ -339,10 +345,7 @@ public partial class MainWindow : Window
             if (System.Array.IndexOf(kinds, item.EventKind) >= 0)
             {
                 vm.Timeline.SelectedItem = item;
-                var list = this.GetVisualDescendants()
-                    .OfType<ListBox>()
-                    .FirstOrDefault(b => b.Name == "ItemsList");
-                list?.ScrollIntoView(item);
+                TimelineList()?.ScrollIntoView(item);
                 return;
             }
         }
@@ -363,5 +366,13 @@ public partial class MainWindow : Window
         var next = current < 0 ? 0 : current + delta;
         next = ((next % tabs.Count) + tabs.Count) % tabs.Count;
         vm.SelectedTab = tabs[next];
+
+        // Pull focus to the timeline ListBox. Otherwise focus stays on
+        // the bottom Tabs ListBox after a mouse click on a tab name,
+        // and that ListBox's incremental letter-search swallows
+        // subsequent A/S key presses (or fights with our tunnel handler
+        // on every press), which the user perceives as a lag specific
+        // to whichever tab they last clicked into.
+        TimelineList()?.Focus();
     }
 }

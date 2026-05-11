@@ -318,6 +318,7 @@ public partial class TimelineViewModel : ViewModelBase
 
             _allItems.Clear();
             _allItems.AddRange(newAll);
+            InvalidateTabCache();
 
             // Hydrate bookmark flags from the local-state store. A single
             // query covers every item; we then stamp each VM whose
@@ -374,10 +375,47 @@ public partial class TimelineViewModel : ViewModelBase
     /// in O(N) over a 200-row cache instead of paying a SQL round-trip
     /// plus N VM constructions per change.
     /// </summary>
+    // Per-tab cache of the sorted display list. Invalidated whenever the
+    // master cache (_allItems) or any non-tab filter axis (repo / search /
+    // bookmarks) changes. Lets a rapid A/S tab cycle skip the filter +
+    // dedup + sort work and jump straight to refilling Items.
+    private readonly Dictionary<TimelineTab, List<TimelineItemViewModel>> _tabListCache = new();
+    private string? _cachedFilterSignature;
+
+    private static string FilterSignature(TimelineFilter f)
+    {
+        var repos = f.MatchesAllRepositories
+            ? "*"
+            : string.Join(",", f.RepositoryFullNames!.OrderBy(r => r, StringComparer.Ordinal));
+        return $"r={repos};s={f.SearchText ?? string.Empty}";
+    }
+
+    private void InvalidateTabCache()
+    {
+        _tabListCache.Clear();
+        _cachedFilterSignature = null;
+    }
+
     private void ApplyCurrentFilter()
     {
         var filter = Filter;
         var previouslySelectedId = SelectedItem?.Id;
+
+        // Non-tab axes (repo / search) invalidate every tab cache; reusing
+        // a stale entry would surface rows that the new repo/search would
+        // have filtered out.
+        var sig = FilterSignature(filter);
+        if (!string.Equals(_cachedFilterSignature, sig, StringComparison.Ordinal))
+        {
+            _tabListCache.Clear();
+            _cachedFilterSignature = sig;
+        }
+
+        if (_tabListCache.TryGetValue(filter.Tab, out var cached))
+        {
+            ReplaceItems(cached, previouslySelectedId);
+            return;
+        }
 
         // First pass: gather every matching item in _allItems order
         // (oldest first, Tween-style).
@@ -459,6 +497,12 @@ public partial class TimelineViewModel : ViewModelBase
             .ThenBy(i => i.UpdatedAt)
             .ToList();
 
+        _tabListCache[filter.Tab] = rearranged;
+        ReplaceItems(rearranged, previouslySelectedId);
+    }
+
+    private void ReplaceItems(IReadOnlyList<TimelineItemViewModel> rearranged, string? previouslySelectedId)
+    {
         Items.Clear();
         foreach (var item in rearranged)
         {
@@ -577,6 +621,14 @@ public partial class TimelineViewModel : ViewModelBase
         if (e.PropertyName == nameof(TimelineItemViewModel.Unread))
         {
             RecomputeAggregates();
+        }
+        else if (e.PropertyName == nameof(TimelineItemViewModel.IsBookmarked))
+        {
+            // A bookmark flip changes which items belong in the Bookmarks
+            // tab's cached list, so clear ALL tab caches (other tabs
+            // include / exclude the row identically before/after).
+            // Cheapest correct policy.
+            InvalidateTabCache();
         }
     }
 

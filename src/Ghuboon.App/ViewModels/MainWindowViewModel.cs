@@ -342,6 +342,8 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
         }
     }
 
+    private CancellationTokenSource? _tabDebounce;
+
     partial void OnSelectedTabChanged(string value)
     {
         var tab = value switch
@@ -353,12 +355,64 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
             TabWatching => TimelineTab.Watching,
             _ => TimelineTab.All,
         };
-        Timeline.ApplyFilter(Timeline.Filter with { Tab = tab });
+
+        // Coalesce rapid A/S / mouse-click sequences so only the final
+        // tab actually fires the filter pass. Without this, holding A
+        // briefly fires ApplyCurrentFilter (full 200-row sort + Items
+        // refill + SelectedItem repaint) for every intermediate tab,
+        // and the user feels every step.
+        var previous = _tabDebounce;
+        var cts = new CancellationTokenSource();
+        _tabDebounce = cts;
+        previous?.Cancel();
+        previous?.Dispose();
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(60), cts.Token).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) { return; }
+            if (cts.IsCancellationRequested) return;
+            void Apply()
+            {
+                if (!ReferenceEquals(_tabDebounce, cts)) return;
+                Timeline.ApplyFilter(Timeline.Filter with { Tab = tab });
+            }
+            if (UiDispatcher is { } d) d(Apply); else Apply();
+        });
     }
+
+    private CancellationTokenSource? _searchDebounce;
 
     partial void OnSearchTextChanged(string value)
     {
-        Timeline.ApplyFilter(Timeline.Filter with { SearchText = value });
+        // Each keystroke fires OnSearchTextChanged; a rapid 5-character
+        // search would otherwise re-run ApplyCurrentFilter (sort + Items
+        // refill of ~200 rows) 5 times. Debounce so only the last value
+        // typed in a ~150 ms window actually triggers a filter pass.
+        var previous = _searchDebounce;
+        var cts = new CancellationTokenSource();
+        _searchDebounce = cts;
+        previous?.Cancel();
+        previous?.Dispose();
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(150), cts.Token).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) { return; }
+            if (cts.IsCancellationRequested) return;
+            void Apply()
+            {
+                if (!ReferenceEquals(_searchDebounce, cts)) return;
+                Timeline.ApplyFilter(Timeline.Filter with { SearchText = value });
+            }
+            if (UiDispatcher is { } d) d(Apply); else Apply();
+        });
     }
 
 
