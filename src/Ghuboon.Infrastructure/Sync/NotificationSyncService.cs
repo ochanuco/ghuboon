@@ -58,6 +58,13 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
     private CancellationTokenSource? _backgroundCts;
     private Task? _backgroundTask;
 
+    // Serialize SyncAsync so an InitialLoad fire-and-forget call and the
+    // first background-timer tick don't end up running the persist loop
+    // concurrently. Concurrent foreach passes thrashed SQLite (one
+    // connection per repo op × SQLCipher key derivation) and pushed each
+    // sync's NewNotifications.Invoke 60+ s behind the upstream activity.
+    private readonly SemaphoreSlim _syncGate = new(1, 1);
+
     public NotificationSyncService(
         ICredentialStore credentialStore,
         IAccountRepository accountRepository,
@@ -111,6 +118,19 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(accountId);
 
+        await _syncGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            return await SyncCoreAsync(accountId, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _syncGate.Release();
+        }
+    }
+
+    private async Task<SyncResult> SyncCoreAsync(string accountId, CancellationToken ct)
+    {
         RaiseProgress(accountId, SyncStage.Starting, null);
 
         // 1. Resolve account.
