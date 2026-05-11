@@ -58,8 +58,11 @@ public class TimelineViewModelTests
     }
 
     [Fact]
-    public async Task Load_OrdersByUpdatedAtDesc()
+    public async Task Load_OrdersBySourceUpdatedAtAsc()
     {
+        // Tween-style timeline: oldest at the top, newest at the bottom.
+        // Mirrors DbBackedTimelineService.LoadAsync's outer ORDER BY
+        // source_updated_at ASC.
         var fake = new FakeTimelineService();
         var t0 = new DateTimeOffset(2026, 5, 9, 12, 0, 0, TimeSpan.Zero);
         fake.AddNotification(NotificationReason.Mention, "a/r", "older", updatedAt: t0.AddHours(-2));
@@ -69,7 +72,7 @@ public class TimelineViewModelTests
         var vm = new TimelineViewModel(fake);
         await vm.ReloadAsync();
 
-        Assert.Equal(new[] { "newer", "middle", "older" }, new[] { vm.Items[0].Title, vm.Items[1].Title, vm.Items[2].Title });
+        Assert.Equal(new[] { "older", "middle", "newer" }, new[] { vm.Items[0].Title, vm.Items[1].Title, vm.Items[2].Title });
     }
 
     [Fact]
@@ -205,7 +208,16 @@ public class TimelineViewModelTests
                     || n.Reason.ToString().Contains(needle, StringComparison.OrdinalIgnoreCase)
                     || (n.Subject.Type ?? string.Empty).Contains(needle, StringComparison.OrdinalIgnoreCase));
             }
-            return Task.FromResult<IReadOnlyList<NotificationEvent>>(q.OrderByDescending(n => n.SourceUpdatedAt).ToList());
+            // Match the production OUTER ORDER from
+            // DbBackedTimelineService.LoadAsync: rows sorted ASC by
+            // SourceUpdatedAt (Tween-style — newest at the bottom).
+            // Use Id as a deterministic tie-break to match the SQL
+            // "ORDER BY source_updated_at ASC, id ASC", so two events
+            // sharing a timestamp keep the same relative order the
+            // production query would emit. The previous DESC sort masked
+            // regressions because tests could pass under either direction.
+            return Task.FromResult<IReadOnlyList<NotificationEvent>>(
+                q.OrderBy(n => n.SourceUpdatedAt).ThenBy(n => n.Id).ToList());
         }
 
         public Task<IReadOnlyList<RepositoryRef>> ListRepositoriesAsync(CancellationToken ct = default)
