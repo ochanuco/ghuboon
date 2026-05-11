@@ -109,7 +109,15 @@ public class NotificationSyncServiceTests
         var first = BuildNotification("1", NotificationReason.Review);
         h.Api.EnqueueList(new NotificationsResponse(new[] { first }, "\"e1\"", RateLimitInfo.Empty, NotModified: false));
 
-        var second = BuildNotification("2", NotificationReason.Mention);
+        // The second notification's UpdatedAt must be > the
+        // LastSuccessfulSyncAt persisted by the first sync (which is the
+        // harness clock). The "old-event suppression" gate
+        // (notification.UpdatedAt > state.LastSuccessfulSyncAt) is what
+        // keeps banners quiet for zombie threads upstream surfaces with
+        // stale timestamps; the test's job is to exercise the truly-new
+        // path, so set updatedAt explicitly.
+        var second = BuildNotification("2", NotificationReason.Mention,
+            updatedAt: h.Clock.UtcNow.AddMinutes(1));
         h.Api.EnqueueList(new NotificationsResponse(new[] { first, second }, "\"e2\"", RateLimitInfo.Empty, NotModified: false));
 
         var service = h.BuildService();
@@ -190,11 +198,17 @@ public class NotificationSyncServiceTests
         await service.SyncAsync(AccountId);
 
         var ev = Assert.Single(fired);
-        Assert.Equal(4, ev.HighPriorityNew.Count);
+        // Allow-list: Review/Mention/TeamMention/Assigned/MyPr/State/Comment.
+        // The set was widened beyond ADR-021's original four after the user
+        // wanted authored-PR activity (MyPr), state transitions (State),
+        // and comment threads (Comment) to also fire OS banners.
+        Assert.Equal(6, ev.HighPriorityNew.Count);
         Assert.Contains(ev.HighPriorityNew, n => n.Reason == NotificationReason.Review);
         Assert.Contains(ev.HighPriorityNew, n => n.Reason == NotificationReason.Mention);
         Assert.Contains(ev.HighPriorityNew, n => n.Reason == NotificationReason.TeamMention);
         Assert.Contains(ev.HighPriorityNew, n => n.Reason == NotificationReason.Assigned);
+        Assert.Contains(ev.HighPriorityNew, n => n.Reason == NotificationReason.MyPr);
+        Assert.Contains(ev.HighPriorityNew, n => n.Reason == NotificationReason.Comment);
     }
 
     [Fact]

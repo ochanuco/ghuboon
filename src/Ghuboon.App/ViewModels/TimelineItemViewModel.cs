@@ -113,6 +113,46 @@ public partial class TimelineItemViewModel : ViewModelBase
     [NotifyPropertyChangedFor(nameof(CommentAuthorBadge))]
     private string? _actorLogin;
 
+    /// <summary>
+    /// True when this row IS the currently-selected row. Set by
+    /// <see cref="TimelineViewModel"/> on selection change. Drives the
+    /// blue selection tint that wins over every other row color.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(RowBackgroundColor))]
+    private bool _isSelectedRow;
+
+    /// <summary>
+    /// True when this row shares its <see cref="NotificationId"/> with the
+    /// currently-focused row. Drives the "related thread" tint so the user
+    /// can see at a glance which TL rows belong to the same PR / Issue.
+    /// Set by <see cref="TimelineViewModel"/> on selection change.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(RowBackgroundColor))]
+    private bool _isRelatedToFocus;
+
+    /// <summary>
+    /// Background tint for the timeline row, in priority order:
+    ///   1. Selected row → blue (always wins).
+    ///   2. Mention / TeamMention → soft red (someone called you out).
+    ///   3. Review request → soft orange (a review is waiting on you,
+    ///      separate from mention so the two action types can be
+    ///      distinguished at a glance).
+    ///   4. Same-thread sibling of the focused row → soft green.
+    ///   5. Otherwise transparent.
+    /// </summary>
+    public string RowBackgroundColor =>
+        IsSelectedRow ? "#BBDEFB"
+        : Reason switch
+        {
+            NotificationReason.Mention => "#FFEBEE",
+            NotificationReason.TeamMention => "#FFEBEE",
+            NotificationReason.Review => "#FFF3E0",
+            _ when IsRelatedToFocus => "#E8F5E9",
+            _ => "Transparent",
+        };
+
     private bool _bodyAttempted;
 
     /// <summary>
@@ -183,6 +223,16 @@ public partial class TimelineItemViewModel : ViewModelBase
         UpdatedAt = source.SourceUpdatedAt;
         _unread = source.Unread;
         _actorLogin = source.ActorLogin;
+        // Hydrate from the per-event body cache (Migration v8). When the
+        // event already carries a fetched body we render from cache and
+        // skip the API call entirely on the next selection.
+        if (!string.IsNullOrEmpty(source.Body))
+        {
+            _body = source.Body;
+            _bodyAuthorLogin = source.BodyAuthorLogin;
+            _bodyLoaded = true;
+            _bodyAttempted = true;
+        }
     }
 
     /// <summary>
@@ -336,16 +386,52 @@ public partial class TimelineItemViewModel : ViewModelBase
             return;
         }
 
+        // Optimistic flip: Unread / OnMarkRead fire IMMEDIATELY on the
+        // calling (UI) thread before any await, so the unread dot and the
+        // aggregated counter update without waiting on the network and DB.
+        // The independent I/O paths (API + notifications row + event-log
+        // siblings) then run in parallel. A failed API call reverts Unread
+        // and surfaces a flash; local DB failures stay non-fatal.
+        // Awaiting the WhenAll keeps the RelayCommand "in-flight" while
+        // the network call finishes (so a rapid second click is still
+        // suppressed via the in-flight slot) without making the user wait
+        // for the visible state.
         try
         {
-            var pat = _ctx.PatProvider is null ? null : await _ctx.PatProvider(ct).ConfigureAwait(false);
+            var pat = _ctx.PatProvider is null ? null : await _ctx.PatProvider(ct).ConfigureAwait(true);
+            var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
 
+            // Only flip optimistically when we can also push the change
+            // upstream. Without a working PAT / API / ThreadId the local
+            // cache would drift ahead of GitHub's actual state and stay
+            // marked-read even though we never PATCH'd /notifications, so
+            // the next sync would either reopen the row or leave the user
+            // wondering why their fix never landed. CR feedback: don't
+            // start the optimistic update when upstream isn't reachable.
+            var canPushUpstream = _ctx.Api is not null
+                && !string.IsNullOrEmpty(pat)
+                && !string.IsNullOrEmpty(ThreadId);
+
+            if (canPushUpstream)
+            {
+                Unread = false;
+                FlashMessage = null;
+                _ctx.OnMarkRead?.Invoke(this);
+            }
+            else
+            {
+                _ctx.Log?.Information("Mark-as-read skipped: missing PAT / Api / ThreadId for {NotificationId}", NotificationId);
+                FlashMessage = "Sign in to mark read on GitHub; local state unchanged.";
+                return;
+            }
+
+            // API first — if it fails, revert the optimistic flip and skip
+            // local DB writes so the cache stays in sync with the (still-
+            // unread) upstream state. ADR-014: read-sync failures degrade
+            // gracefully; the next sync will reconcile.
             try
             {
-                if (_ctx.Api is not null && !string.IsNullOrEmpty(pat) && !string.IsNullOrEmpty(ThreadId))
-                {
-                    await _ctx.Api.MarkThreadReadAsync(pat, ThreadId, ct).ConfigureAwait(false);
-                }
+                await _ctx.Api!.MarkThreadReadAsync(pat!, ThreadId, ct).ConfigureAwait(true);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -353,63 +439,63 @@ public partial class TimelineItemViewModel : ViewModelBase
             }
             catch (Exception ex)
             {
-                // Phase 10 acceptance: failed read sync must not crash the app and
-                // the next sync reconciles. We surface the failure quietly.
                 _ctx.Log?.Warning(ex, "Mark-as-read API call failed for {ThreadId}", ThreadId);
+                Unread = true;
                 FlashMessage = "Read sync failed; will retry on next sync.";
                 return;
             }
 
-            var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
-
-            if (_ctx.Repository is not null && !string.IsNullOrEmpty(NotificationId) && !string.IsNullOrEmpty(AccountId))
+            // DB writes run in parallel because they're independent paths
+            // (notifications row vs event-log siblings) and we've already
+            // confirmed upstream success.
+            //
+            // Use the targeted SetReadStateAsync so only `unread` and
+            // `last_read_at` are touched; the previous full UpsertAsync
+            // rebuild had stripped subject_api_url / latest_comment_url /
+            // raw_json to nulls and broken the body fetch + Kind
+            // classification on the next render.
+            Task notifTask = Task.CompletedTask;
+            if (_ctx.Repository is not null && !string.IsNullOrEmpty(NotificationId))
             {
-                try
-                {
-                    var updated = new GitHubNotification(
-                        NotificationId,
-                        AccountId,
-                        ThreadId,
-                        RepositoryFullName,
-                        new NotificationSubject(SubjectType, Title, null, WebUrl),
-                        Reason,
-                        Unread: false,
-                        UpdatedAt,
-                        LastReadAt: now);
-                    await _ctx.Repository.UpsertAsync(updated, string.Empty, now, ct).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    _ctx.Log?.Warning(ex, "Persisting local read state failed for {Id}", NotificationId);
-                }
+                notifTask = SwallowAsync(
+                    _ctx.Repository.SetReadStateAsync(NotificationId, unread: false, readAt: now, ct),
+                    "Persisting local read state failed for " + NotificationId);
             }
 
-            // Event-log timeline: flip every sibling event row for the same
-            // thread so the timeline does not keep showing prior observations
-            // as unread after the user resolves a thread. Failure here is
-            // logged but non-fatal — the latest state in `notifications` is
-            // already advanced and the next sync will reconcile.
+            Task eventTask = Task.CompletedTask;
             if (_ctx.EventRepository is not null && !string.IsNullOrEmpty(NotificationId) && !string.IsNullOrEmpty(AccountId))
             {
-                try
-                {
-                    await _ctx.EventRepository
-                        .MarkThreadAsReadAsync(AccountId, NotificationId, now, ct)
-                        .ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    _ctx.Log?.Warning(ex, "Marking event-log siblings read failed for {NotificationId}", NotificationId);
-                }
+                eventTask = SwallowAsync(
+                    _ctx.EventRepository.MarkThreadAsReadAsync(AccountId, NotificationId, now, ct),
+                    "Marking event-log siblings read failed for " + NotificationId);
             }
 
-            Unread = false;
-            FlashMessage = null;
-            _ctx.OnMarkRead?.Invoke(this);
+            await Task.WhenAll(notifTask, eventTask).ConfigureAwait(true);
         }
         finally
         {
             Interlocked.Exchange(ref _markAsReadInFlight, 0);
+        }
+    }
+
+    /// <summary>
+    /// Swallow exceptions on a background task so a single sub-task failure
+    /// doesn't fault the WhenAll. Each callsite already passes a per-task
+    /// log message for diagnostics.
+    /// </summary>
+    private async Task SwallowAsync(Task task, string failureMessage)
+    {
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // not surfaced
+        }
+        catch (Exception ex)
+        {
+            _ctx.Log?.Warning(ex, "{Message}", failureMessage);
         }
     }
 
@@ -560,6 +646,25 @@ public partial class TimelineItemViewModel : ViewModelBase
 
             Body = StripHtmlComments(content);
             BodyAuthorLogin = bodyAuthor;
+
+            // Persist the body to the per-event cache so subsequent renders
+            // (next reload, future sessions) read from the local DB and
+            // don't re-hit the GitHub API for the same row. Only writes
+            // when we actually got content; an empty fetch leaves the row
+            // null so the next selection retries.
+            if (!string.IsNullOrEmpty(Body)
+                && _ctx.EventRepository is { } bodyRepo
+                && EventLocalId is { } bodyEventId)
+            {
+                try
+                {
+                    await bodyRepo.SetBodyAsync(bodyEventId, Body, BodyAuthorLogin, ct).ConfigureAwait(true);
+                }
+                catch (Exception ex)
+                {
+                    _ctx.Log?.Information(ex, "Persisting body for event {EventId} failed (non-fatal)", bodyEventId);
+                }
+            }
 
             // ActorLogin = the actor of THIS row's content (commenter for
             // Comment kind, creator for PR/Issue kind). Always overwrite

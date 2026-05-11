@@ -109,7 +109,7 @@ internal sealed class LastNotifiedTracker
     public async Task<bool> TryMarkAsNotifiedAsync(
         string accountId,
         string notificationId,
-        DateTimeOffset at,
+        DateTimeOffset eventAt,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(accountId);
@@ -117,23 +117,30 @@ internal sealed class LastNotifiedTracker
 
         await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
 
-        // The WHERE clause on the DO UPDATE branch ensures the update only
-        // happens when no prior notification is recorded. If the row already
-        // exists with a non-null last_notified_at, the conflict triggers an
-        // update whose WHERE filters it out, yielding 0 affected rows.
-        // Issue #32: the conflict target is the composite key
-        // (account_id, notification_id), so two accounts that legitimately see
-        // the same notification id can each claim their own row independently.
-        // The DO UPDATE branch never touches account_id; it can't change for
-        // an existing primary key, and assigning it would risk silently
-        // re-pointing a row to the wrong account.
+        // Fire when the candidate event's timestamp is strictly newer than
+        // any prior notification we recorded for this thread. We also
+        // re-notify when the column is null (first time seeing the thread).
+        // The previous IS NULL gate fired only once per thread for life,
+        // which is wrong for an event-log timeline: a Draft → Open
+        // transition or a fresh comment on an authored PR has its own
+        // source_updated_at and deserves its own banner.
+        //
+        // last_notified_at stores the candidate's source_updated_at (so we
+        // can compare future events against the same axis), not now(). The
+        // event-log timeline already uses source_updated_at for ordering.
+        //
+        // Issue #32: composite conflict key (account_id, notification_id) so
+        // two accounts that observe the same notification id stay separate.
+        // The DO UPDATE branch never touches account_id (cannot change for
+        // an existing primary key).
         const string sql = """
                            INSERT INTO notification_local_states (
                                notification_id, account_id, last_notified_at, is_hidden)
                            VALUES (@id, @account, @at, 0)
                            ON CONFLICT(account_id, notification_id) DO UPDATE SET
                                last_notified_at = excluded.last_notified_at
-                           WHERE notification_local_states.last_notified_at IS NULL;
+                           WHERE notification_local_states.last_notified_at IS NULL
+                              OR datetime(notification_local_states.last_notified_at) < datetime(excluded.last_notified_at);
                            """;
 
         var affected = await connection.ExecuteAsync(new CommandDefinition(
@@ -142,7 +149,7 @@ internal sealed class LastNotifiedTracker
             {
                 id = notificationId,
                 account = accountId,
-                at = at.ToString("O"),
+                at = eventAt.ToUniversalTime().ToString("O"),
             },
             cancellationToken: ct)).ConfigureAwait(false);
 

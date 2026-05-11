@@ -61,6 +61,17 @@ internal sealed class FakeNotificationRepository : INotificationRepository
         Notifications[idx] = Notifications[idx] with { ActorLogin = actorLogin };
         return Task.FromResult(1);
     }
+
+    public int SetReadStateCallCount { get; private set; }
+
+    public Task<int> SetReadStateAsync(string id, bool unread, DateTimeOffset readAt, CancellationToken ct = default)
+    {
+        SetReadStateCallCount++;
+        var idx = Notifications.FindIndex(n => n.Id == id);
+        if (idx < 0) return Task.FromResult(0);
+        Notifications[idx] = Notifications[idx] with { Unread = unread, LastReadAt = readAt };
+        return Task.FromResult(1);
+    }
 }
 
 /// <summary>
@@ -161,6 +172,19 @@ internal sealed class FakeNotificationEventRepository : INotificationEventReposi
             if (Events[i].Id == eventId)
             {
                 Events[i] = Events[i] with { ActorLogin = actorLogin };
+                return Task.FromResult(1);
+            }
+        }
+        return Task.FromResult(0);
+    }
+
+    public Task<int> SetBodyAsync(long eventId, string? body, string? bodyAuthorLogin, CancellationToken ct = default)
+    {
+        for (var i = 0; i < Events.Count; i++)
+        {
+            if (Events[i].Id == eventId)
+            {
+                Events[i] = Events[i] with { Body = body, BodyAuthorLogin = bodyAuthorLogin };
                 return Task.FromResult(1);
             }
         }

@@ -57,4 +57,13 @@ public interface INotificationEventRepository
     /// event id and returns the number of rows affected (0 or 1).
     /// </summary>
     Task<int> SetActorLoginAsync(long eventId, string actorLogin, CancellationToken ct = default);
+
+    /// <summary>
+    /// Persists cached body content (PR/Issue description or comment text)
+    /// and the displayed body's author login for a single event row, so a
+    /// later re-render of the same row can read from the local DB instead
+    /// of re-fetching from GitHub. Both arguments may be null when the
+    /// upstream returned no content (the next selection retries).
+    /// </summary>
+    Task<int> SetBodyAsync(long eventId, string? body, string? bodyAuthorLogin, CancellationToken ct = default);
 }

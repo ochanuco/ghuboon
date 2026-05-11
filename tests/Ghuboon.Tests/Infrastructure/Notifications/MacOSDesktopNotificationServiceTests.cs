@@ -36,10 +36,12 @@ public class MacOSDesktopNotificationServiceTests
     }
 
     [Fact]
-    public void BuildAppleScript_wraps_title_and_body_in_display_notification_command()
+    public void BuildAppleScript_wraps_title_and_body_in_display_notification_command_with_sound()
     {
         var script = MacOSDesktopNotificationService.BuildAppleScript("Mention: x/y", "PR title");
-        Assert.Equal("display notification \"PR title\" with title \"Mention: x/y\"", script);
+        Assert.Equal(
+            "display notification \"PR title\" with title \"Mention: x/y\" sound name \"Glass\"",
+            script);
     }
 
     [Fact]
@@ -50,7 +52,14 @@ public class MacOSDesktopNotificationServiceTests
             "body with \\backslash and \"quote\"");
 
         Assert.Equal(
-            "display notification \"body with \\\\backslash and \\\"quote\\\"\" with title \"title with \\\"quote\\\"\"",
+            "display notification \"body with \\\\backslash and \\\"quote\\\"\" with title \"title with \\\"quote\\\"\" sound name \"Glass\"",
             script);
+    }
+
+    [Fact]
+    public void BuildAppleScript_escapes_sound_name()
+    {
+        var script = MacOSDesktopNotificationService.BuildAppleScript("t", "b", "Custom\"Sound");
+        Assert.Contains("sound name \"Custom\\\"Sound\"", script);
     }
 }

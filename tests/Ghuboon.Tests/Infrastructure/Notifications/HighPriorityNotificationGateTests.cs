@@ -63,11 +63,14 @@ public class HighPriorityNotificationGateTests
         Assert.Single(first);
         Assert.Equal("acct-1:n1", first[0].Id);
 
-        // Verify last_notified_at was persisted by the dedup write.
+        // The dedup persists candidate.UpdatedAt (the event's source axis),
+        // not the wall clock — the gate now allows re-firing when a future
+        // event has a strictly newer source_updated_at, so the comparison
+        // axis is the event timestamp.
         var tracker = new LastNotifiedTrackerProbe(temp.Factory);
         var stored = await tracker.GetLastNotifiedAtAsync("acct-1:n1");
         Assert.NotNull(stored);
-        Assert.Equal(clock.UtcNow, stored);
+        Assert.Equal(notif.UpdatedAt, stored);
     }
 
     [Fact]

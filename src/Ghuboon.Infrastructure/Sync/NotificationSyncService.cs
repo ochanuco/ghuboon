@@ -15,25 +15,27 @@ namespace Ghuboon.Infrastructure.Sync;
 /// (ADR-022, 30 days), and high-priority new-item eventing (ADR-021).
 /// </para>
 /// <para>
-/// Background loop fires every <see cref="DefaultPeriod"/> (5 minutes per ADR-020).
+/// Background loop fires every <see cref="DefaultPeriod"/> (60 seconds —
+/// GitHub's recommended floor for etag-conditional polling).
 /// Tests may override the period via the constructor for fast iteration.
 /// </para>
 /// </summary>
 public sealed class NotificationSyncService : INotificationSyncService, IAsyncDisposable, IDisposable
 {
-    /// <summary>Default 5-minute periodic sync interval (ADR-020).</summary>
-    public static readonly TimeSpan DefaultPeriod = TimeSpan.FromMinutes(5);
+    /// <summary>
+    /// Default 60-second periodic sync interval. GitHub's
+    /// <c>X-Poll-Interval</c> header guidance for the notifications
+    /// endpoint is 60 seconds, and conditional requests that 304 don't
+    /// count against the rate-limit budget — so we can poll at the
+    /// recommended floor without burning quota. Earlier 5-minute
+    /// interval (ADR-020) added 2-3 minute perceived lag on every new
+    /// event; reverting to the GitHub-recommended cadence trades that
+    /// lag for cheap conditional GETs.
+    /// </summary>
+    public static readonly TimeSpan DefaultPeriod = TimeSpan.FromSeconds(60);
 
     /// <summary>30-day cache retention (ADR-022).</summary>
     public static readonly TimeSpan CacheRetention = TimeSpan.FromDays(30);
-
-    private static readonly HashSet<NotificationReason> HighPriorityReasons = new()
-    {
-        NotificationReason.Review,
-        NotificationReason.Mention,
-        NotificationReason.TeamMention,
-        NotificationReason.Assigned,
-    };
 
     private static readonly JsonSerializerOptions RawJsonOptions = new()
     {
@@ -168,7 +170,19 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
             return dbResult;
         }
 
-        var hadPriorEtag = !string.IsNullOrEmpty(state.NotificationsEtag);
+        // "Have we ever synced before?" — used to suppress an avalanche
+        // of OS banners on initial install where every cached unread
+        // thread looks brand-new. We OR two signals:
+        //   * LastSuccessfulSyncAt: set on every successful sync.
+        //   * NotificationsEtag: set when GitHub returns an etag.
+        // Either alone would have a gap. GitHub sometimes returns an
+        // empty etag for the notifications endpoint, so a long-running
+        // session with valid LastSuccessfulSyncAt but an empty etag
+        // would otherwise mis-classify as "never synced" and silence
+        // its banners (the user-reported "TL has the row but no banner
+        // for 1–2 minutes" lag).
+        var hasPriorSync = state.LastSuccessfulSyncAt is not null
+            || !string.IsNullOrEmpty(state.NotificationsEtag);
 
         // 4. Call GitHub API.
         RaiseProgress(accountId, SyncStage.Fetching, null);
@@ -377,10 +391,19 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
 
                 // OS-banner trigger: any newly-observed event (new thread OR
                 // existing thread with a fresh source_updated_at) deserves a
-                // banner if the reason is high-priority. Without this an
-                // authored PR's CI / state-change / comment activity stayed
-                // silent because isNew was false on every re-observation.
-                if (eventAppended && HighPriorityReasons.Contains(notification.Reason))
+                // banner if the reason is high-priority. Old events that
+                // upstream surfaces for the first time but whose
+                // source_updated_at is older than our previous successful
+                // sync are NOT new from the user's perspective — we either
+                // banner'd them already in a past run, or the user has
+                // since moved on. Re-firing them is the "old notifications
+                // suddenly appear" UX bug. We still let them through on
+                // the very first sync (LastSuccessfulSyncAt is null and
+                // hasPriorSync gates the whole event upstream anyway).
+                if (eventAppended
+                    && HighPriorityNotificationReasons.Contains(notification.Reason)
+                    && (state.LastSuccessfulSyncAt is null
+                        || notification.UpdatedAt > state.LastSuccessfulSyncAt))
                 {
                     highPriorityNew.Add(notification);
                 }
@@ -455,10 +478,13 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
             Message: null,
             RateLimit: response.RateLimit);
 
-        RaiseProgress(accountId, SyncStage.Completed, result2);
-
-        // 9. NewNotifications event — only when we already had a prior etag (ADR-021).
-        if (hadPriorEtag && highPriorityNew.Count > 0)
+        // 9. NewNotifications event — fire BEFORE Progress.Completed so the
+        // OS banner is dispatched alongside the timeline reload rather than
+        // racing it. Suppressed only on the FIRST EVER sync (no prior
+        // successful sync) so a fresh install doesn't banner every cached
+        // thread; once we've synced once, every later sync fires and the
+        // gate's per-event dedup keeps re-observations quiet.
+        if (hasPriorSync && highPriorityNew.Count > 0)
         {
             try
             {
@@ -469,6 +495,8 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 _logger?.Warning(ex, "NewNotifications subscriber threw");
             }
         }
+
+        RaiseProgress(accountId, SyncStage.Completed, result2);
 
         return result2;
     }

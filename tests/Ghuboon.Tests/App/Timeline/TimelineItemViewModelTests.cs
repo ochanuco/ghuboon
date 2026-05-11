@@ -57,7 +57,9 @@ public class TimelineItemViewModelTests
         var threads = api.MarkedReadThreads.ToList();
         Assert.Single(threads);
         Assert.Equal("1", threads[0]);
-        Assert.Equal(1, repo.UpsertCallCount);
+        // MarkAsRead now uses the targeted SetReadStateAsync rather than
+        // a full UpsertAsync rebuild, so we count that call instead.
+        Assert.Equal(1, repo.SetReadStateCallCount);
     }
 
     [Fact]
@@ -70,7 +72,9 @@ public class TimelineItemViewModelTests
 
         Assert.False(vm.Unread);
         Assert.Single(api.MarkedReadThreads);
-        Assert.Equal(1, repo.UpsertCallCount);
+        // MarkAsRead now uses the targeted SetReadStateAsync rather than
+        // a full UpsertAsync rebuild, so we count that call instead.
+        Assert.Equal(1, repo.SetReadStateCallCount);
     }
 
     [Fact]

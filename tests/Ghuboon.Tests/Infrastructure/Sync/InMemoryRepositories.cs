@@ -134,6 +134,17 @@ internal sealed class InMemoryNotificationRepository : INotificationRepository
         return Task.FromResult(1);
     }
 
+    public Task<int> SetReadStateAsync(string id, bool unread, DateTimeOffset readAt, CancellationToken ct = default)
+    {
+        if (!_notifs.TryGetValue(id, out var entry))
+        {
+            return Task.FromResult(0);
+        }
+        var updated = entry.Notification with { Unread = unread, LastReadAt = readAt };
+        _notifs[id] = entry with { Notification = updated };
+        return Task.FromResult(1);
+    }
+
     public int Count => _notifs.Count;
 
     public void SeedWithSyncedAt(GitHubNotification notification, DateTimeOffset syncedAt)
@@ -260,6 +271,23 @@ internal sealed class InMemoryNotificationEventRepository : INotificationEventRe
                 if (ev.Id == eventId)
                 {
                     _entries[i] = new Entry(ev with { ActorLogin = actorLogin });
+                    return Task.FromResult(1);
+                }
+            }
+            return Task.FromResult(0);
+        }
+    }
+
+    public Task<int> SetBodyAsync(long eventId, string? body, string? bodyAuthorLogin, CancellationToken ct = default)
+    {
+        lock (_gate)
+        {
+            for (var i = 0; i < _entries.Count; i++)
+            {
+                var ev = _entries[i].Event;
+                if (ev.Id == eventId)
+                {
+                    _entries[i] = new Entry(ev with { Body = body, BodyAuthorLogin = bodyAuthorLogin });
                     return Task.FromResult(1);
                 }
             }

@@ -21,8 +21,9 @@ public class MigrationRunnerTests
         // notification_events for the event-log timeline; v4 backfills
         // historical event rows; v5 adds actor_login; v6 adds
         // latest_comment_url for the EventKind classification; v7 adds the
-        // (account_id, notification_id) index that MarkThreadAsRead leans on.
-        Assert.Equal(new[] { 1, 2, 3, 4, 5, 6, 7 }, versions);
+        // (account_id, notification_id) index that MarkThreadAsRead leans
+        // on; v8 adds the body / body_author_login cache columns.
+        Assert.Equal(new[] { 1, 2, 3, 4, 5, 6, 7, 8 }, versions);
 
         var tableNames = (await connection.QueryAsync<string>(
                 "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name;"))
@@ -61,7 +62,7 @@ public class MigrationRunnerTests
                 "SELECT version FROM _schema_migrations ORDER BY version;"))
             .ToList();
 
-        Assert.Equal(new[] { 1, 2, 3, 4, 5, 6, 7 }, versions);
+        Assert.Equal(new[] { 1, 2, 3, 4, 5, 6, 7, 8 }, versions);
     }
 
     [Fact]
@@ -492,7 +493,7 @@ public class MigrationRunnerTests
         await using (var conn = await temp.RawFactory.OpenAsync())
         {
             var applied = await runner.RunAsync(conn);
-            Assert.Equal(new[] { 2, 3, 4, 5, 6, 7 }, applied.ToArray());
+            Assert.Equal(new[] { 2, 3, 4, 5, 6, 7, 8 }, applied.ToArray());
         }
 
         // Verify post-migration state.

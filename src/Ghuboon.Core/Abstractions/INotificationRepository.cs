@@ -33,4 +33,16 @@ public interface INotificationRepository
     /// the matching row and returns the number of rows affected (0 or 1).
     /// </summary>
     Task<int> SetActorLoginAsync(string id, string actorLogin, CancellationToken ct = default);
+
+    /// <summary>
+    /// Flip the read flag on the single notifications row identified by
+    /// <paramref name="id"/> without re-upserting the whole payload.
+    /// The detail-pane MarkAsRead flow used to rebuild a full
+    /// <c>GitHubNotification</c> with stripped subject fields and call
+    /// <see cref="UpsertAsync"/>, which silently overwrote
+    /// <c>subject_api_url</c> / <c>latest_comment_url</c> / <c>raw_json</c>
+    /// with nulls. A targeted UPDATE is the right tool: only the columns
+    /// the user actually changed get touched.
+    /// </summary>
+    Task<int> SetReadStateAsync(string id, bool unread, DateTimeOffset readAt, CancellationToken ct = default);
 }

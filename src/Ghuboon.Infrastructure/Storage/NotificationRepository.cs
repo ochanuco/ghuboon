@@ -190,6 +190,36 @@ public sealed class NotificationRepository : INotificationRepository
             cancellationToken: ct)).ConfigureAwait(false);
     }
 
+    public async Task<int> SetReadStateAsync(string id, bool unread, DateTimeOffset readAt, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+
+        await using var connection = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
+
+        // Targeted update: only touch unread + last_read_at. The detail-pane
+        // MarkAsRead flow used to rebuild a full GitHubNotification with
+        // stripped subject fields and call UpsertAsync, which silently
+        // overwrote subject_api_url / latest_comment_url / raw_json with
+        // nulls. This UPDATE keeps every other column intact so the
+        // subject body fetch and EventKind classification still work
+        // after a row is marked read.
+        const string sql = """
+                           UPDATE notifications
+                              SET unread = @unread,
+                                  last_read_at = @lastReadAt
+                            WHERE id = @id;
+                           """;
+        return await connection.ExecuteAsync(new CommandDefinition(
+            sql,
+            new
+            {
+                id,
+                unread = unread ? 1L : 0L,
+                lastReadAt = readAt.ToUniversalTime().ToString("O"),
+            },
+            cancellationToken: ct)).ConfigureAwait(false);
+    }
+
     public async Task<int> SetActorLoginAsync(string id, string actorLogin, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
