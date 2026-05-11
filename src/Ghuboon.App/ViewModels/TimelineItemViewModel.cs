@@ -419,35 +419,34 @@ public partial class TimelineItemViewModel : ViewModelBase
         // The independent I/O paths (API + notifications row + event-log
         // siblings) then run in parallel. A failed API call reverts Unread
         // and surfaces a flash; local DB failures stay non-fatal.
-        // Awaiting the WhenAll keeps the RelayCommand "in-flight" while
-        // the network call finishes (so a rapid second click is still
-        // suppressed via the in-flight slot) without making the user wait
-        // for the visible state.
+        //
+        // The flip happens BEFORE the first await so the Keychain PAT
+        // lookup (~tens of ms per call on macOS) doesn't introduce a
+        // visible delay between keypress and unread dot disappearing.
+        // If the prerequisites turn out to be missing (no PAT / Api /
+        // ThreadId) or the API call fails, the flip is reverted below.
+        var canRevert = Unread;
+        var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
+        Unread = false;
+        FlashMessage = null;
+        _ctx.OnMarkRead?.Invoke(this);
+
         try
         {
             var pat = _ctx.PatProvider is null ? null : await _ctx.PatProvider(ct).ConfigureAwait(true);
-            var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
 
-            // Only flip optimistically when we can also push the change
-            // upstream. Without a working PAT / API / ThreadId the local
-            // cache would drift ahead of GitHub's actual state and stay
-            // marked-read even though we never PATCH'd /notifications, so
-            // the next sync would either reopen the row or leave the user
-            // wondering why their fix never landed. CR feedback: don't
-            // start the optimistic update when upstream isn't reachable.
+            // Without a working PAT / API / ThreadId the local cache
+            // would drift ahead of GitHub's actual state and stay
+            // marked-read even though we never PATCH'd /notifications,
+            // so revert the optimistic flip and surface a hint.
             var canPushUpstream = _ctx.Api is not null
                 && !string.IsNullOrEmpty(pat)
                 && !string.IsNullOrEmpty(ThreadId);
 
-            if (canPushUpstream)
-            {
-                Unread = false;
-                FlashMessage = null;
-                _ctx.OnMarkRead?.Invoke(this);
-            }
-            else
+            if (!canPushUpstream)
             {
                 _ctx.Log?.Information("Mark-as-read skipped: missing PAT / Api / ThreadId for {NotificationId}", NotificationId);
+                if (canRevert) Unread = true;
                 Flash("Sign in to mark read on GitHub; local state unchanged.");
                 return;
             }

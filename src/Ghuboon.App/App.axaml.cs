@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -136,6 +137,14 @@ public partial class App : Application
                 var toShow = await notifyGate
                     .FilterAsync(ev.AccountId, ev.HighPriorityNew)
                     .ConfigureAwait(false);
+                // Fire every banner in parallel: each osascript spawn is
+                // ~50–200 ms and macOS's UserNotificationCenter queues
+                // them anyway, so serializing with `await ShowAsync`
+                // inside the foreach used to mean 5 banners = 5×spawn
+                // serially while the TL had already rendered the new
+                // rows. Letting them run concurrently keeps banner
+                // latency closer to the single-banner case.
+                var dispatched = new List<Task>(toShow.Count);
                 foreach (var n in toShow)
                 {
                     var dn = new DesktopNotification(
@@ -143,7 +152,11 @@ public partial class App : Application
                         Title: $"{n.Reason}: {n.RepositoryFullName}",
                         Body: n.Subject.Title,
                         Url: n.Subject.WebUrl);
-                    await notifyService.ShowAsync(dn).ConfigureAwait(false);
+                    dispatched.Add(notifyService.ShowAsync(dn));
+                }
+                if (dispatched.Count > 0)
+                {
+                    await Task.WhenAll(dispatched).ConfigureAwait(false);
                 }
             }
             catch (Exception ex)
@@ -221,6 +234,7 @@ public partial class App : Application
         {
             RepositoriesSource = timelineService,
             UiDispatcher = action => Dispatcher.UIThread.Post(action),
+            AppSettingsStore = settingsRepo,
         };
         mainVmRef = vm;
 

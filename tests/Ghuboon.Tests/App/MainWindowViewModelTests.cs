@@ -38,7 +38,7 @@ public class MainWindowViewModelTests
     }
 
     [Fact]
-    public void ChangingSelectedTab_RaisesPropertyChanged_AndUpdatesTimelineFilter()
+    public async Task ChangingSelectedTab_RaisesPropertyChanged_AndUpdatesTimelineFilter()
     {
         var vm = new MainWindowViewModel(new StubAppSettingsService(), new StubTimelineService());
         var changes = new List<string?>();
@@ -48,7 +48,22 @@ public class MainWindowViewModelTests
 
         Assert.Contains(nameof(MainWindowViewModel.SelectedTab), changes);
         Assert.Equal(MainWindowViewModel.TabReview, vm.SelectedTab);
+
+        // OnSelectedTabChanged debounces (~60 ms) before pushing the new
+        // Tab into Timeline.Filter to coalesce rapid A/S cycling. Wait
+        // out the debounce window before asserting the filter applied.
+        await WaitUntil(() => vm.Timeline.CurrentFilter == "Review", TimeSpan.FromSeconds(2));
         Assert.Equal("Review", vm.Timeline.CurrentFilter);
+    }
+
+    private static async Task WaitUntil(Func<bool> condition, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition()) return;
+            await Task.Delay(20).ConfigureAwait(false);
+        }
     }
 
     [Fact]

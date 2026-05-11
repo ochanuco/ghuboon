@@ -1,4 +1,7 @@
+using System;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -33,6 +36,71 @@ public partial class MainWindow : Window
         // open right after our jump-to-unread runs. Same gating as
         // OnKeyDown: skip when a TextBox owns focus, otherwise eat it.
         AddHandler(KeyUpEvent, OnKeyUp, RoutingStrategies.Tunnel);
+
+        Opened += OnWindowOpened;
+        Closing += OnWindowClosing;
+        // Debounce live position / size changes so dragging the window
+        // doesn't write to the encrypted DB on every pixel.
+        PositionChanged += (_, _) => ScheduleSaveBounds();
+        PropertyChanged += (_, e) =>
+        {
+            if (e.Property == WidthProperty || e.Property == HeightProperty)
+            {
+                ScheduleSaveBounds();
+            }
+        };
+    }
+
+    private CancellationTokenSource? _boundsSaveCts;
+
+    private async void OnWindowOpened(object? sender, EventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var bounds = await vm.TryLoadWindowBoundsAsync().ConfigureAwait(true);
+        if (bounds is null) return;
+        var (x, y, w, h) = bounds.Value;
+        Width = w;
+        Height = h;
+        Position = new Avalonia.PixelPoint((int)x, (int)y);
+    }
+
+    private void OnWindowClosing(object? sender, Avalonia.Controls.WindowClosingEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        // Synchronous-style fire so the save lands before process exit;
+        // SetAsync is fast (a single SQLite UPSERT).
+        _ = vm.SaveWindowBoundsAsync(Position.X, Position.Y, Width, Height);
+    }
+
+    private void ScheduleSaveBounds()
+    {
+        if (DataContext is not MainWindowViewModel vm || vm.AppSettingsStore is null) return;
+        // Coalesce live drag / resize events into a single save at the
+        // tail of a quiet 600 ms window. The save still runs on the
+        // thread pool so the UI thread isn't blocked on the DB write.
+        var previous = _boundsSaveCts;
+        var cts = new CancellationTokenSource();
+        _boundsSaveCts = cts;
+        previous?.Cancel();
+        previous?.Dispose();
+
+        var capturedPos = Position;
+        var capturedW = Width;
+        var capturedH = Height;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(600), cts.Token).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) { return; }
+            if (cts.IsCancellationRequested) return;
+            try
+            {
+                await vm.SaveWindowBoundsAsync(capturedPos.X, capturedPos.Y, capturedW, capturedH).ConfigureAwait(false);
+            }
+            catch { /* non-fatal */ }
+        });
     }
 
     private void OnKeyUp(object? sender, KeyEventArgs e)

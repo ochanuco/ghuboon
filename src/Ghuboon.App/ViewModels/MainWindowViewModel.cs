@@ -35,6 +35,43 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
     private readonly EventHandler<SyncProgressEvent>? _progressHandler;
 
     /// <summary>
+    /// Optional raw key/value store used to persist the window's last
+    /// position and size across launches. Injected from the composition
+    /// root; null in tests / stubs so the window keeps its declared
+    /// default bounds.
+    /// </summary>
+    public Ghuboon.Core.Abstractions.IAppSettingsRepository? AppSettingsStore { get; init; }
+
+    private const string WindowBoundsKey = "window.bounds";
+
+    public async Task<(double X, double Y, double Width, double Height)?> TryLoadWindowBoundsAsync(CancellationToken ct = default)
+    {
+        if (AppSettingsStore is null) return null;
+        try
+        {
+            var raw = await AppSettingsStore.GetAsync(WindowBoundsKey, ct).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            var parts = raw.Split(',');
+            if (parts.Length != 4) return null;
+            if (!double.TryParse(parts[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x)) return null;
+            if (!double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var y)) return null;
+            if (!double.TryParse(parts[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var w)) return null;
+            if (!double.TryParse(parts[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var h)) return null;
+            if (w <= 100 || h <= 100) return null; // sanity floor
+            return (x, y, w, h);
+        }
+        catch { return null; }
+    }
+
+    public Task SaveWindowBoundsAsync(double x, double y, double width, double height, CancellationToken ct = default)
+    {
+        if (AppSettingsStore is null) return Task.CompletedTask;
+        var raw = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+            "{0:0.##},{1:0.##},{2:0.##},{3:0.##}", x, y, width, height);
+        return AppSettingsStore.SetAsync(WindowBoundsKey, raw, ct);
+    }
+
+    /// <summary>
     /// Optional UI-thread marshaller. The App layer assigns
     /// <see cref="Avalonia.Threading.Dispatcher.UIThread"/>'s post when running for
     /// real; tests leave it null and run handlers synchronously.
