@@ -159,6 +159,11 @@ public partial class App : Application
         var browser = new Browser();
         var clipboard = new AvaloniaClipboard();
         IBookmarkRepository bookmarks = new BookmarkRepository(dbFactory);
+        // Late-bound reference so each per-row context can route its
+        // user-facing acks ("Copied" / "Bookmarked" / ...) into the
+        // window's status bar. We can't capture the VM directly because
+        // the factory is consumed before construction returns the VM.
+        MainWindowViewModel? mainVmRef = null;
         TimelineItemContext ItemCtxFactory()
         {
             return new TimelineItemContext(
@@ -176,7 +181,8 @@ public partial class App : Application
                 },
                 OnMarkRead: null,
                 Log: _logger,
-                Bookmarks: bookmarks);
+                Bookmarks: bookmarks,
+                OnFlash: msg => mainVmRef?.ShowFlash(msg));
         }
 
         // 9. Timeline service backed by the event-log cache.
@@ -216,6 +222,7 @@ public partial class App : Application
             RepositoriesSource = timelineService,
             UiDispatcher = action => Dispatcher.UIThread.Post(action),
         };
+        mainVmRef = vm;
 
         return vm;
     }

@@ -133,13 +133,15 @@ public partial class MainWindow : Window
                 JumpToKind(-1, Core.Domain.NotificationEventKind.PullRequest, Core.Domain.NotificationEventKind.Comment);
                 e.Handled = true;
                 break;
-            // Bookmarks. Shift+S registers the focused row, Shift+Cmd+S
-            // (Shift+Ctrl+S on Windows / Linux) clears it. The MetaKey
-            // modifier in Avalonia maps to Command on macOS and the
-            // Windows key on Windows; KeyModifiers.Control is the Ctrl
-            // key cross-platform, so we accept either as the "clear"
-            // chord per the user's spec.
-            case Key.S when e.KeyModifiers == KeyModifiers.Shift:
+            // Bookmarks (mirrors OpenTween's Ctrl+S = Fav add,
+            // Ctrl+Shift+S = Fav remove):
+            //   * Cmd+S (macOS) / Ctrl+S (Win, Linux): bookmark
+            //   * Cmd+Shift+S (macOS) / Ctrl+Shift+S (Win, Linux): clear
+            // KeyModifiers.Meta is Command on macOS; KeyModifiers.Control
+            // is Ctrl cross-platform. We accept either modifier family so
+            // the same chord works on both Mac and Windows.
+            case Key.S when e.KeyModifiers == KeyModifiers.Meta:
+            case Key.S when e.KeyModifiers == KeyModifiers.Control:
                 BookmarkSelected();
                 e.Handled = true;
                 break;

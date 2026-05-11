@@ -53,10 +53,11 @@ public sealed record TimelineItemContext(
     Func<CancellationToken, Task<string?>>? PatProvider,
     Action<TimelineItemViewModel>? OnMarkRead,
     ILogger? Log,
-    IBookmarkRepository? Bookmarks = null)
+    IBookmarkRepository? Bookmarks = null,
+    Action<string>? OnFlash = null)
 {
     public static TimelineItemContext Empty { get; } =
-        new(null, null, null, null, null, null, null, null, null, null);
+        new(null, null, null, null, null, null, null, null, null, null, null);
 }
 
 /// <summary>
@@ -81,6 +82,22 @@ public partial class TimelineItemViewModel : ViewModelBase
 
     [ObservableProperty]
     private string? _flashMessage;
+
+    /// <summary>
+    /// Set <see cref="FlashMessage"/> and also surface the message to the
+    /// window status bar via <see cref="TimelineItemContext.OnFlash"/>.
+    /// User-facing acks like "Copied" / "Bookmarked" / read-sync failure
+    /// flow through here so the user sees them in a single, stable
+    /// location instead of (or in addition to) the per-row hint.
+    /// </summary>
+    private void Flash(string? message)
+    {
+        FlashMessage = message;
+        if (!string.IsNullOrEmpty(message))
+        {
+            _ctx.OnFlash?.Invoke(message);
+        }
+    }
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasNoBodyAfterLoad))]
@@ -431,7 +448,7 @@ public partial class TimelineItemViewModel : ViewModelBase
             else
             {
                 _ctx.Log?.Information("Mark-as-read skipped: missing PAT / Api / ThreadId for {NotificationId}", NotificationId);
-                FlashMessage = "Sign in to mark read on GitHub; local state unchanged.";
+                Flash("Sign in to mark read on GitHub; local state unchanged.");
                 return;
             }
 
@@ -451,7 +468,7 @@ public partial class TimelineItemViewModel : ViewModelBase
             {
                 _ctx.Log?.Warning(ex, "Mark-as-read API call failed for {ThreadId}", ThreadId);
                 Unread = true;
-                FlashMessage = "Read sync failed; will retry on next sync.";
+                Flash("Read sync failed; will retry on next sync.");
                 return;
             }
 
@@ -532,7 +549,7 @@ public partial class TimelineItemViewModel : ViewModelBase
         }
 
         await _ctx.Clipboard.SetTextAsync(WebUrl).ConfigureAwait(false);
-        FlashMessage = "Copied";
+        Flash("Copied");
     }
 
     [RelayCommand]
@@ -549,7 +566,7 @@ public partial class TimelineItemViewModel : ViewModelBase
             ? n.ToString(System.Globalization.CultureInfo.InvariantCulture)
             : Id;
         await _ctx.Clipboard.SetTextAsync(label).ConfigureAwait(false);
-        FlashMessage = $"Copied event id {label}";
+        Flash($"Copied event id {label}");
     }
 
     /// <summary>
@@ -566,7 +583,7 @@ public partial class TimelineItemViewModel : ViewModelBase
         if (IsBookmarked) return; // idempotent
 
         IsBookmarked = true;
-        FlashMessage = "Bookmarked";
+        Flash("Bookmarked");
         try
         {
             var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
@@ -586,7 +603,7 @@ public partial class TimelineItemViewModel : ViewModelBase
         if (!IsBookmarked) return; // idempotent
 
         IsBookmarked = false;
-        FlashMessage = "Bookmark removed";
+        Flash("Bookmark removed");
         try
         {
             await _ctx.Bookmarks.ClearAsync(AccountId, NotificationId, ct).ConfigureAwait(true);

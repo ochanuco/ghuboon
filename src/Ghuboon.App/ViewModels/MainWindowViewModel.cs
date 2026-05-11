@@ -65,6 +65,47 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
     [ObservableProperty]
     private string _statusText = string.Empty;
 
+    /// <summary>
+    /// Transient acknowledgement shown at the bottom of the window
+    /// ("Bookmarked" / "Copied" / etc.). Set via <see cref="ShowFlash"/>,
+    /// auto-clears after a short delay so it doesn't get stale.
+    /// </summary>
+    [ObservableProperty]
+    private string? _flashText;
+
+    private CancellationTokenSource? _flashCts;
+
+    /// <summary>
+    /// Surface a short acknowledgement in the bottom status bar. Each
+    /// call resets the timeout, so a rapid sequence of clicks shows the
+    /// latest message rather than the first.
+    /// </summary>
+    public void ShowFlash(string message)
+    {
+        if (string.IsNullOrEmpty(message)) return;
+        FlashText = message;
+
+        // Replace any in-flight clear so the latest message lives for its
+        // full window rather than getting cut short by a previous timer.
+        var previous = _flashCts;
+        var cts = new CancellationTokenSource();
+        _flashCts = cts;
+        previous?.Cancel();
+        previous?.Dispose();
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(3), cts.Token).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) { return; }
+            if (cts.IsCancellationRequested) return;
+            void Clear() { if (ReferenceEquals(_flashCts, cts)) FlashText = null; }
+            if (UiDispatcher is { } d) d(Clear); else Clear();
+        });
+    }
+
     [ObservableProperty]
     private string? _lastSyncText;
 

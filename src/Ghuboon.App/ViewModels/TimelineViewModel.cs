@@ -422,8 +422,45 @@ public partial class TimelineViewModel : ViewModelBase
         }
         coalesced.Reverse(); // restore oldest-first display order
 
-        Items.Clear();
+        // Group by thread, put the PR / parent row first, comments after.
+        // Without this the timeline shows COMMENT(older) → PR(newer) when
+        // the very first observation of a thread happened to be a comment
+        // notification: the parent PR's "creation" row is later in the
+        // event log because its SourceUpdatedAt is the LATER observation
+        // time, not the actual PR-created time. Anchor each thread by its
+        // earliest event timestamp so cross-thread chronology is mostly
+        // preserved; inside a thread, PR-kind always wins.
+        var threadAnchor = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
         foreach (var item in coalesced)
+        {
+            if (string.IsNullOrEmpty(item.NotificationId)) continue;
+            if (!threadAnchor.TryGetValue(item.NotificationId, out var existing)
+                || item.UpdatedAt < existing)
+            {
+                threadAnchor[item.NotificationId] = item.UpdatedAt;
+            }
+        }
+
+        static int KindPriority(NotificationEventKind k) => k switch
+        {
+            NotificationEventKind.PullRequest => 0,
+            NotificationEventKind.Issue => 0,
+            NotificationEventKind.Discussion => 0,
+            // Parent-entity kinds share priority 0; comments / others fall to 1.
+            _ => 1,
+        };
+
+        var rearranged = coalesced
+            .OrderBy(i => string.IsNullOrEmpty(i.NotificationId)
+                ? i.UpdatedAt
+                : (threadAnchor.TryGetValue(i.NotificationId, out var anchor) ? anchor : i.UpdatedAt))
+            .ThenBy(i => i.NotificationId, StringComparer.Ordinal)
+            .ThenBy(i => KindPriority(i.EventKind))
+            .ThenBy(i => i.UpdatedAt)
+            .ToList();
+
+        Items.Clear();
+        foreach (var item in rearranged)
         {
             Items.Add(item);
         }
