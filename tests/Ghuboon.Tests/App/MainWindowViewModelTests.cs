@@ -28,6 +28,7 @@ public class MainWindowViewModelTests
             new[]
             {
                 MainWindowViewModel.TabAll,
+                MainWindowViewModel.TabBookmarks,
                 MainWindowViewModel.TabReview,
                 MainWindowViewModel.TabMention,
                 MainWindowViewModel.TabMyPrs,
