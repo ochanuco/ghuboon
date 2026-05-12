@@ -22,6 +22,7 @@ namespace Ghuboon.App.ViewModels;
 public partial class MainWindowViewModel : ViewModelBase, IDisposable
 {
     public const string TabAll = "All";
+    public const string TabBookmarks = "Bookmarks";
     public const string TabReview = "Review";
     public const string TabMention = "Mention";
     public const string TabMyPrs = "My PRs";
@@ -32,6 +33,43 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
     private readonly IClock? _clock;
     private readonly Func<Task<string?>>? _accountIdProvider;
     private readonly EventHandler<SyncProgressEvent>? _progressHandler;
+
+    /// <summary>
+    /// Optional raw key/value store used to persist the window's last
+    /// position and size across launches. Injected from the composition
+    /// root; null in tests / stubs so the window keeps its declared
+    /// default bounds.
+    /// </summary>
+    public Ghuboon.Core.Abstractions.IAppSettingsRepository? AppSettingsStore { get; init; }
+
+    private const string WindowBoundsKey = "window.bounds";
+
+    public async Task<(double X, double Y, double Width, double Height)?> TryLoadWindowBoundsAsync(CancellationToken ct = default)
+    {
+        if (AppSettingsStore is null) return null;
+        try
+        {
+            var raw = await AppSettingsStore.GetAsync(WindowBoundsKey, ct).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            var parts = raw.Split(',');
+            if (parts.Length != 4) return null;
+            if (!double.TryParse(parts[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x)) return null;
+            if (!double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var y)) return null;
+            if (!double.TryParse(parts[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var w)) return null;
+            if (!double.TryParse(parts[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var h)) return null;
+            if (w <= 100 || h <= 100) return null; // sanity floor
+            return (x, y, w, h);
+        }
+        catch { return null; }
+    }
+
+    public Task SaveWindowBoundsAsync(double x, double y, double width, double height, CancellationToken ct = default)
+    {
+        if (AppSettingsStore is null) return Task.CompletedTask;
+        var raw = string.Format(System.Globalization.CultureInfo.InvariantCulture,
+            "{0:0.##},{1:0.##},{2:0.##},{3:0.##}", x, y, width, height);
+        return AppSettingsStore.SetAsync(WindowBoundsKey, raw, ct);
+    }
 
     /// <summary>
     /// Optional UI-thread marshaller. The App layer assigns
@@ -64,6 +102,58 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
     [ObservableProperty]
     private string _statusText = string.Empty;
 
+    /// <summary>
+    /// Transient acknowledgement shown at the bottom of the window
+    /// ("Bookmarked" / "Copied" / etc.). Set via <see cref="ShowFlash"/>,
+    /// auto-clears after a short delay so it doesn't get stale.
+    /// </summary>
+    [ObservableProperty]
+    private string? _flashText;
+
+    private CancellationTokenSource? _flashCts;
+
+    /// <summary>
+    /// Surface a short acknowledgement in the bottom status bar. Each
+    /// call resets the timeout, so a rapid sequence of clicks shows the
+    /// latest message rather than the first.
+    /// </summary>
+    public void ShowFlash(string message)
+    {
+        if (string.IsNullOrEmpty(message)) return;
+        FlashText = message;
+
+        // Replace any in-flight clear so the latest message lives for its
+        // full window rather than getting cut short by a previous timer.
+        var previous = _flashCts;
+        var cts = new CancellationTokenSource();
+        _flashCts = cts;
+        previous?.Cancel();
+        previous?.Dispose();
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(3), cts.Token).ConfigureAwait(false);
+                }
+                catch (TaskCanceledException) { return; }
+                if (cts.IsCancellationRequested) return;
+                void Clear() { if (ReferenceEquals(_flashCts, cts)) FlashText = null; }
+                if (UiDispatcher is { } d) d(Clear); else Clear();
+            }
+            finally
+            {
+                // Dispose this iteration's CTS so we don't leak one per
+                // flash. If we're still the current _flashCts (no later
+                // ShowFlash call replaced us), null the field too.
+                if (ReferenceEquals(_flashCts, cts)) _flashCts = null;
+                cts.Dispose();
+            }
+        });
+    }
+
     [ObservableProperty]
     private string? _lastSyncText;
 
@@ -92,15 +182,21 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
         INotificationSyncService? syncService,
         IClock? clock,
         Func<Task<string?>>? accountIdProvider,
-        SettingsViewModel? settingsViewModel = null)
+        SettingsViewModel? settingsViewModel = null,
+        Ghuboon.Core.Abstractions.IBookmarkRepository? bookmarks = null,
+        string? bookmarkAccountId = null)
     {
         _appSettings = appSettings;
         _syncService = syncService;
         _clock = clock;
         _accountIdProvider = accountIdProvider;
 
-        Tabs = new[] { TabAll, TabReview, TabMention, TabMyPrs, TabWatching };
-        Timeline = new TimelineViewModel(timelineService);
+        Tabs = new[] { TabAll, TabBookmarks, TabReview, TabMention, TabMyPrs, TabWatching };
+        Timeline = new TimelineViewModel(timelineService)
+        {
+            Bookmarks = bookmarks,
+            BookmarkAccountId = bookmarkAccountId,
+        };
         Settings = settingsViewModel ?? new SettingsViewModel(appSettings);
         Repositories = new List<RepositoryRef>();
 
@@ -294,22 +390,77 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
         }
     }
 
+    private CancellationTokenSource? _tabDebounce;
+
     partial void OnSelectedTabChanged(string value)
     {
         var tab = value switch
         {
+            TabBookmarks => TimelineTab.Bookmarks,
             TabReview => TimelineTab.Review,
             TabMention => TimelineTab.Mention,
             TabMyPrs => TimelineTab.MyPrs,
             TabWatching => TimelineTab.Watching,
             _ => TimelineTab.All,
         };
-        Timeline.ApplyFilter(Timeline.Filter with { Tab = tab });
+
+        // Coalesce rapid A/S / mouse-click sequences so only the final
+        // tab actually fires the filter pass. Without this, holding A
+        // briefly fires ApplyCurrentFilter (full 200-row sort + Items
+        // refill + SelectedItem repaint) for every intermediate tab,
+        // and the user feels every step.
+        var previous = _tabDebounce;
+        var cts = new CancellationTokenSource();
+        _tabDebounce = cts;
+        previous?.Cancel();
+        previous?.Dispose();
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(60), cts.Token).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) { return; }
+            if (cts.IsCancellationRequested) return;
+            void Apply()
+            {
+                if (!ReferenceEquals(_tabDebounce, cts)) return;
+                Timeline.ApplyFilter(Timeline.Filter with { Tab = tab });
+            }
+            if (UiDispatcher is { } d) d(Apply); else Apply();
+        });
     }
+
+    private CancellationTokenSource? _searchDebounce;
 
     partial void OnSearchTextChanged(string value)
     {
-        Timeline.ApplyFilter(Timeline.Filter with { SearchText = value });
+        // Each keystroke fires OnSearchTextChanged; a rapid 5-character
+        // search would otherwise re-run ApplyCurrentFilter (sort + Items
+        // refill of ~200 rows) 5 times. Debounce so only the last value
+        // typed in a ~150 ms window actually triggers a filter pass.
+        var previous = _searchDebounce;
+        var cts = new CancellationTokenSource();
+        _searchDebounce = cts;
+        previous?.Cancel();
+        previous?.Dispose();
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(150), cts.Token).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) { return; }
+            if (cts.IsCancellationRequested) return;
+            void Apply()
+            {
+                if (!ReferenceEquals(_searchDebounce, cts)) return;
+                Timeline.ApplyFilter(Timeline.Filter with { SearchText = value });
+            }
+            if (UiDispatcher is { } d) d(Apply); else Apply();
+        });
     }
 
 
@@ -524,5 +675,22 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
         }
 
         Timeline.PropertyChanged -= OnTimelinePropertyChanged;
+
+        // Cancel + dispose the debounce / flash token sources so any
+        // pending UI callbacks fire as no-ops after the window is
+        // disposed. Without this the 3-second flash auto-clear and
+        // the search/tab 150 ms / 60 ms debounces could still trigger
+        // (and observe a torn VM) after Dispose returned.
+        _flashCts?.Cancel();
+        _flashCts?.Dispose();
+        _flashCts = null;
+
+        _tabDebounce?.Cancel();
+        _tabDebounce?.Dispose();
+        _tabDebounce = null;
+
+        _searchDebounce?.Cancel();
+        _searchDebounce?.Dispose();
+        _searchDebounce = null;
     }
 }

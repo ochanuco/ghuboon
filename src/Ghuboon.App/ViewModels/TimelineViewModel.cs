@@ -26,6 +26,22 @@ public partial class TimelineViewModel : ViewModelBase
     private TimelineFilter _filter = TimelineFilter.Default;
     private CancellationTokenSource? _loadCts;
 
+    /// <summary>
+    /// Optional bookmark repository. Hosted at the VM level so a single
+    /// query per Reload hydrates every TimelineItemViewModel's
+    /// <see cref="TimelineItemViewModel.IsBookmarked"/> flag (cheaper than
+    /// asking per row). Set by the App composition root; null in tests
+    /// keeps the Bookmarks tab empty.
+    /// </summary>
+    public Ghuboon.Core.Abstractions.IBookmarkRepository? Bookmarks { get; init; }
+
+    /// <summary>
+    /// Optional account id whose bookmarks we hydrate. The DbBackedTimelineService
+    /// already pulls events for the primary account, and bookmarks live on
+    /// the same account axis, so we mirror that scope here.
+    /// </summary>
+    public string? BookmarkAccountId { get; init; }
+
     // Master cache: every event row the service returned on the last DB
     // fetch, in display order. Tab / repo / search filter changes operate
     // on this cache in-memory so they no longer round-trip the DB and
@@ -302,6 +318,31 @@ public partial class TimelineViewModel : ViewModelBase
 
             _allItems.Clear();
             _allItems.AddRange(newAll);
+            InvalidateTabCache();
+
+            // Hydrate bookmark flags from the local-state store. A single
+            // query covers every item; we then stamp each VM whose
+            // NotificationId is in the set. Survives across reloads
+            // because the source of truth is the DB.
+            if (Bookmarks is not null && !string.IsNullOrEmpty(BookmarkAccountId))
+            {
+                try
+                {
+                    var bookmarkedIds = await Bookmarks
+                        .GetBookmarkedIdsAsync(BookmarkAccountId!, cts.Token)
+                        .ConfigureAwait(true);
+                    foreach (var item in _allItems)
+                    {
+                        item.IsBookmarked = bookmarkedIds.Contains(item.NotificationId);
+                    }
+                }
+                catch (OperationCanceledException) when (cts.IsCancellationRequested) { throw; }
+                catch
+                {
+                    // Bookmark hydration is non-fatal: timeline still renders,
+                    // the user can re-bookmark.
+                }
+            }
 
             ApplyCurrentFilter();
 
@@ -334,18 +375,138 @@ public partial class TimelineViewModel : ViewModelBase
     /// in O(N) over a 200-row cache instead of paying a SQL round-trip
     /// plus N VM constructions per change.
     /// </summary>
+    // Per-tab cache of the sorted display list. Invalidated whenever the
+    // master cache (_allItems) or any non-tab filter axis (repo / search /
+    // bookmarks) changes. Lets a rapid A/S tab cycle skip the filter +
+    // dedup + sort work and jump straight to refilling Items.
+    private readonly Dictionary<TimelineTab, List<TimelineItemViewModel>> _tabListCache = new();
+    private string? _cachedFilterSignature;
+
+    private static string FilterSignature(TimelineFilter f)
+    {
+        var repos = f.MatchesAllRepositories
+            ? "*"
+            : string.Join(",", f.RepositoryFullNames!.OrderBy(r => r, StringComparer.Ordinal));
+        return $"r={repos};s={f.SearchText ?? string.Empty}";
+    }
+
+    private void InvalidateTabCache()
+    {
+        _tabListCache.Clear();
+        _cachedFilterSignature = null;
+    }
+
     private void ApplyCurrentFilter()
     {
         var filter = Filter;
         var previouslySelectedId = SelectedItem?.Id;
 
-        Items.Clear();
+        // Non-tab axes (repo / search) invalidate every tab cache; reusing
+        // a stale entry would surface rows that the new repo/search would
+        // have filtered out.
+        var sig = FilterSignature(filter);
+        if (!string.Equals(_cachedFilterSignature, sig, StringComparison.Ordinal))
+        {
+            _tabListCache.Clear();
+            _cachedFilterSignature = sig;
+        }
+
+        if (_tabListCache.TryGetValue(filter.Tab, out var cached))
+        {
+            ReplaceItems(cached, previouslySelectedId);
+            return;
+        }
+
+        // First pass: gather every matching item in _allItems order
+        // (oldest first, Tween-style).
+        var matched = new List<TimelineItemViewModel>(_allItems.Count);
         foreach (var item in _allItems)
         {
             if (MatchesFilter(item, filter))
             {
-                Items.Add(item);
+                matched.Add(item);
             }
+        }
+
+        // Dedup duplicate observations of the same logical event:
+        //   * Non-Comment kinds (PR / Issue / State / CI / ...) get
+        //     keyed by NotificationId — GitHub bumps updated_at on
+        //     push / CI / state without changing latest_comment_url,
+        //     so each bump appends another event row the EventKind
+        //     classifier reads as PR-mode and the user sees N
+        //     visually-identical rows. Keep the latest one per thread.
+        //   * Comment kind gets keyed by NotificationId +
+        //     LatestCommentApiUrl — the same comment can show up as
+        //     multiple event rows when its parent notification's
+        //     updated_at re-bumps for unrelated activity. Two events
+        //     pointing at the same /comments/{id} are the same logical
+        //     comment, so collapse them too. Distinct comment URLs on
+        //     the same thread (real new comments) survive.
+        // We iterate newest → oldest so the latest event in each
+        // group wins, then reverse for display.
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var coalesced = new List<TimelineItemViewModel>(matched.Count);
+        for (var i = matched.Count - 1; i >= 0; i--)
+        {
+            var item = matched[i];
+            var key = item.EventKind == NotificationEventKind.Comment
+                ? $"C|{item.NotificationId}|{item.LatestCommentApiUrl ?? string.Empty}"
+                : $"T|{item.NotificationId}";
+
+            if (string.IsNullOrEmpty(item.NotificationId) || seen.Add(key))
+            {
+                coalesced.Add(item);
+            }
+        }
+        coalesced.Reverse(); // restore oldest-first display order
+
+        // Group by thread, put the PR / parent row first, comments after.
+        // Without this the timeline shows COMMENT(older) → PR(newer) when
+        // the very first observation of a thread happened to be a comment
+        // notification: the parent PR's "creation" row is later in the
+        // event log because its SourceUpdatedAt is the LATER observation
+        // time, not the actual PR-created time. Anchor each thread by its
+        // earliest event timestamp so cross-thread chronology is mostly
+        // preserved; inside a thread, PR-kind always wins.
+        var threadAnchor = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+        foreach (var item in coalesced)
+        {
+            if (string.IsNullOrEmpty(item.NotificationId)) continue;
+            if (!threadAnchor.TryGetValue(item.NotificationId, out var existing)
+                || item.UpdatedAt < existing)
+            {
+                threadAnchor[item.NotificationId] = item.UpdatedAt;
+            }
+        }
+
+        static int KindPriority(NotificationEventKind k) => k switch
+        {
+            NotificationEventKind.PullRequest => 0,
+            NotificationEventKind.Issue => 0,
+            NotificationEventKind.Discussion => 0,
+            // Parent-entity kinds share priority 0; comments / others fall to 1.
+            _ => 1,
+        };
+
+        var rearranged = coalesced
+            .OrderBy(i => string.IsNullOrEmpty(i.NotificationId)
+                ? i.UpdatedAt
+                : (threadAnchor.TryGetValue(i.NotificationId, out var anchor) ? anchor : i.UpdatedAt))
+            .ThenBy(i => i.NotificationId, StringComparer.Ordinal)
+            .ThenBy(i => KindPriority(i.EventKind))
+            .ThenBy(i => i.UpdatedAt)
+            .ToList();
+
+        _tabListCache[filter.Tab] = rearranged;
+        ReplaceItems(rearranged, previouslySelectedId);
+    }
+
+    private void ReplaceItems(IReadOnlyList<TimelineItemViewModel> rearranged, string? previouslySelectedId)
+    {
+        Items.Clear();
+        foreach (var item in rearranged)
+        {
+            Items.Add(item);
         }
         RecomputeAggregates();
 
@@ -378,6 +539,10 @@ public partial class TimelineViewModel : ViewModelBase
         }
         if (filter.Tab == TimelineTab.MyPrs
             && item.EventKind != NotificationEventKind.PullRequest)
+        {
+            return false;
+        }
+        if (filter.Tab == TimelineTab.Bookmarks && !item.IsBookmarked)
         {
             return false;
         }
@@ -456,6 +621,25 @@ public partial class TimelineViewModel : ViewModelBase
         if (e.PropertyName == nameof(TimelineItemViewModel.Unread))
         {
             RecomputeAggregates();
+        }
+        else if (e.PropertyName == nameof(TimelineItemViewModel.IsBookmarked))
+        {
+            // A bookmark flip changes which items belong in the Bookmarks
+            // tab's cached list, so clear ALL tab caches (other tabs
+            // include / exclude the row identically before/after).
+            InvalidateTabCache();
+
+            // When the user is currently on the Bookmarks tab, just
+            // clearing the cache isn't enough — the visible Items list
+            // still holds the unbookmarked row until something forces
+            // a re-filter. Re-run the filter now so the row drops out
+            // immediately. For other tabs the cached row count is
+            // unchanged (only the bookmarked_at flag flipped), so
+            // skipping the re-filter is correct.
+            if (_filter.Tab == TimelineTab.Bookmarks)
+            {
+                ApplyFilter(_filter);
+            }
         }
     }
 

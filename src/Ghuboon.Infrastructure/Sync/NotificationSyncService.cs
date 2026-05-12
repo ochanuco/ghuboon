@@ -58,6 +58,13 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
     private CancellationTokenSource? _backgroundCts;
     private Task? _backgroundTask;
 
+    // Serialize SyncAsync so an InitialLoad fire-and-forget call and the
+    // first background-timer tick don't end up running the persist loop
+    // concurrently. Concurrent foreach passes thrashed SQLite (one
+    // connection per repo op × SQLCipher key derivation) and pushed each
+    // sync's NewNotifications.Invoke 60+ s behind the upstream activity.
+    private readonly SemaphoreSlim _syncGate = new(1, 1);
+
     public NotificationSyncService(
         ICredentialStore credentialStore,
         IAccountRepository accountRepository,
@@ -111,6 +118,19 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(accountId);
 
+        await _syncGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            return await SyncCoreAsync(accountId, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _syncGate.Release();
+        }
+    }
+
+    private async Task<SyncResult> SyncCoreAsync(string accountId, CancellationToken ct)
+    {
         RaiseProgress(accountId, SyncStage.Starting, null);
 
         // 1. Resolve account.
@@ -187,6 +207,16 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
         // 4. Call GitHub API.
         RaiseProgress(accountId, SyncStage.Fetching, null);
 
+        // Diagnostic trace: log the cadence so we can see polling
+        // intervals and correlate them with per-notification observe
+        // lines below.
+        var fetchStartedAt = _clock.UtcNow;
+        _logger?.Information(
+            "sync.fetch.start account={AccountId} lastSuccessAt={LastSuccessAt:O} etag={HasEtag}",
+            accountId,
+            state.LastSuccessfulSyncAt,
+            !string.IsNullOrEmpty(state.NotificationsEtag));
+
         NotificationsResponse response;
         try
         {
@@ -220,6 +250,13 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
         }
 
         var now = _clock.UtcNow;
+        _logger?.Information(
+            "sync.fetch.done account={AccountId} status={Status} fetchedCount={FetchedCount} durationMs={DurationMs:F0} rateRemaining={RateRemaining}",
+            accountId,
+            response.NotModified ? "304" : "200",
+            response.Notifications.Count,
+            (now - fetchStartedAt).TotalMilliseconds,
+            response.RateLimit.Remaining);
 
         // 5. 304 Not Modified.
         if (response.NotModified)
@@ -320,14 +357,40 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 //   * the notification's Kind has changed since the last
                 //     observation (the prior commenter no longer represents
                 //     the new event row's content).
+                //
+                // AND we additionally gate on "this observation will append
+                // a new event row" (updated_at moved forward). Without this
+                // gate the per-sync foreach blocked ~1.5 s per row on an
+                // actor API call even when no new event was going to be
+                // appended — turning a 35-thread sync into a 50-60 s pass
+                // and pushing the NewNotifications-driven banners that far
+                // behind the upstream activity. Diagnosed from the
+                // observed comment→PR banner gap (~70 s).
+                // Gate the EXPENSIVE actor lookup on "will this observation
+                // likely produce a new event row?" — i.e., upstream's
+                // UpdatedAt has moved forward (or we've never seen this
+                // notification). Without this gate the foreach blocked
+                // ~1.5 s per row on an API call even when the unique index
+                // was about to dedup the event anyway, turning a
+                // 35-thread sync into a 50–60 s pass and pushing the
+                // NewNotifications-driven banner stream that far behind
+                // the upstream activity. Diagnosed from a ~70 s
+                // comment→PR banner gap in production logs.
+                //
+                // TryAppendAsync still runs unconditionally below: the
+                // unique index is the source of truth for dedup, this
+                // gate is purely an actor-API short-circuit.
                 var existingKind = existing?.Subject.Kind;
                 var newKind = notification.Subject.Kind;
-                var needsActorLookup = existing is null
-                    || string.IsNullOrEmpty(existing.ActorLogin)
-                    || existingKind != newKind;
+                var willAppendNewEvent = existing is null
+                    || existing.UpdatedAt != notification.UpdatedAt;
+                var needsActorLookup = willAppendNewEvent
+                    && (existing is null
+                        || string.IsNullOrEmpty(existing.ActorLogin)
+                        || existingKind != newKind);
                 var actorLogin = needsActorLookup
                     ? await ResolveActorLoginAsync(pat, notification, ct).ConfigureAwait(false)
-                    : existing!.ActorLogin;
+                    : existing?.ActorLogin;
 
                 var snapshot = new NotificationEvent(
                     Id: 0,
@@ -389,6 +452,71 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                     updatedCount++;
                 }
 
+                // PR-anchor synthesis: GitHub's /notifications endpoint
+                // collapses a thread's history into a single "latest
+                // state" entry, so if we first observe a thread after a
+                // comment was already posted on it, we never see the
+                // pure PR-only state — the timeline shows a lone
+                // Comment row with no parent. To restore the parent's
+                // anchor row, fetch the subject (PR/Issue/Discussion)
+                // once on the first observation of a Comment-kind
+                // thread and synthesize a parent-kind event row dated
+                // at the subject's created_at.
+                //
+                // Synthetic events do NOT enter highPriorityNew —
+                // historical state shouldn't fire OS banners.
+                if (isNew
+                    && eventAppended
+                    && newKind == NotificationEventKind.Comment
+                    && !string.IsNullOrEmpty(notification.Subject.ApiUrl)
+                    && !string.IsNullOrEmpty(pat))
+                {
+                    try
+                    {
+                        var (_, parentAuthor, parentCreatedAt) = await _apiClient
+                            .GetSubjectMetaAsync(pat, notification.Subject.ApiUrl!, ct)
+                            .ConfigureAwait(false);
+
+                        if (parentCreatedAt is not null)
+                        {
+                            // Clear LatestCommentApiUrl so Kind classifies as
+                            // PullRequest/Issue/Discussion rather than Comment.
+                            var parentSubject = notification.Subject with { LatestCommentApiUrl = null };
+                            var parentSnapshot = new NotificationEvent(
+                                Id: 0,
+                                AccountId: notification.AccountId,
+                                NotificationId: notification.Id,
+                                ThreadId: notification.ThreadId,
+                                RepositoryFullName: notification.RepositoryFullName,
+                                Subject: parentSubject,
+                                Reason: notification.Reason,
+                                SourceUpdatedAt: parentCreatedAt.Value,
+                                ObservedAt: now,
+                                Unread: notification.Unread,
+                                LastReadAt: notification.LastReadAt,
+                                RawJson: rawJson,
+                                ActorLogin: string.IsNullOrEmpty(parentAuthor) ? actorLogin : parentAuthor);
+                            var parentAppended = await _eventRepository
+                                .TryAppendAsync(parentSnapshot, ct)
+                                .ConfigureAwait(false);
+                            _logger?.Information(
+                                "sync.synthesizeParent id={NotificationId} parentKind={Kind} createdAt={CreatedAt:O} appended={Appended}",
+                                notification.Id,
+                                parentSubject.Kind,
+                                parentCreatedAt.Value,
+                                parentAppended);
+                        }
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger?.Information(ex, "PR-anchor synthesis failed for {NotificationId} (non-fatal)", notification.Id);
+                    }
+                }
+
                 // OS-banner trigger: any newly-observed event (new thread OR
                 // existing thread with a fresh source_updated_at) deserves a
                 // banner if the reason is high-priority. Old events that
@@ -400,13 +528,58 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 // suddenly appear" UX bug. We still let them through on
                 // the very first sync (LastSuccessfulSyncAt is null and
                 // hasPriorSync gates the whole event upstream anyway).
-                if (eventAppended
-                    && HighPriorityNotificationReasons.Contains(notification.Reason)
-                    && (state.LastSuccessfulSyncAt is null
-                        || notification.UpdatedAt > state.LastSuccessfulSyncAt))
+                // Gate: skip banners for re-surfaced OLD events whose
+                // upstream UpdatedAt predates our last successful sync
+                // (they're not new from the user's perspective). EXCEPT:
+                //   * first-ever sync (LastSuccessfulSyncAt is null) —
+                //     hasPriorSync gates the outer event anyway.
+                //   * isNew (we've never seen this notification before)
+                //     — without this, sub-second clock skew between
+                //     GitHub's whole-second UpdatedAt and our sub-second
+                //     LastSuccessfulSyncAt was suppressing legitimate
+                //     brand-new notifications. Observed in the field:
+                //     notif.UpdatedAt=14:03:59.000 vs lastSuccess=
+                //     14:03:59.483 silently dropped the banner.
+                var highPriority = HighPriorityNotificationReasons.Contains(notification.Reason);
+                var gatePassed = state.LastSuccessfulSyncAt is null
+                    || isNew
+                    || notification.UpdatedAt > state.LastSuccessfulSyncAt;
+                var bannerEligible = eventAppended && highPriority && gatePassed;
+                if (bannerEligible)
                 {
                     highPriorityNew.Add(notification);
                 }
+
+                // Diagnostic trace: capture per-notification observation
+                // so the comment-arrives-before-PR delivery skew can be
+                // attributed to GitHub delivery lag (DeliveryLag big) vs.
+                // our 60s polling cadence (gap small at observation but
+                // SourceUpdatedAt much earlier than now) vs. the stale-
+                // event banner suppression gate misfiring (gatePassed=
+                // false on a row the user actually wants bannered).
+                // Debug level: one line per notification per sync gets
+                // noisy in production (35 lines / minute on a busy
+                // account). Use Debug so the sink can be silenced without
+                // changing this code; raise to Information only when
+                // actively investigating delivery skew.
+                _logger?.Debug(
+                    "sync.observe id={NotificationId} thread={ThreadId} reason={Reason} kind={Kind} " +
+                    "src.updatedAt={SourceUpdatedAt:O} observedAt={ObservedAt:O} deliveryLagSec={DeliveryLagSec:F1} " +
+                    "lastSuccessAt={LastSuccessfulSyncAt:O} isNew={IsNew} eventAppended={EventAppended} " +
+                    "highPriority={HighPriority} gatePassed={GatePassed} bannerEligible={BannerEligible}",
+                    notification.Id,
+                    notification.ThreadId,
+                    notification.Reason,
+                    notification.Subject.Kind,
+                    notification.UpdatedAt,
+                    now,
+                    (now - notification.UpdatedAt).TotalSeconds,
+                    state.LastSuccessfulSyncAt,
+                    isNew,
+                    eventAppended,
+                    highPriority,
+                    gatePassed,
+                    bannerEligible);
 
                 if (!string.IsNullOrEmpty(notification.RepositoryFullName) &&
                     seenRepoFullNames.Add(notification.RepositoryFullName))
@@ -567,6 +740,10 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
     public void Dispose()
     {
         Stop();
+        // Dispose the serialization gate after Stop() has joined the
+        // background loop; at that point no callers can still be
+        // awaiting it.
+        _syncGate.Dispose();
     }
 
     private async Task RunBackgroundLoopAsync(CancellationToken ct)

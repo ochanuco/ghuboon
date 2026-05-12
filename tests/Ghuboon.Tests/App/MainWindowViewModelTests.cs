@@ -28,6 +28,7 @@ public class MainWindowViewModelTests
             new[]
             {
                 MainWindowViewModel.TabAll,
+                MainWindowViewModel.TabBookmarks,
                 MainWindowViewModel.TabReview,
                 MainWindowViewModel.TabMention,
                 MainWindowViewModel.TabMyPrs,
@@ -37,7 +38,7 @@ public class MainWindowViewModelTests
     }
 
     [Fact]
-    public void ChangingSelectedTab_RaisesPropertyChanged_AndUpdatesTimelineFilter()
+    public async Task ChangingSelectedTab_RaisesPropertyChanged_AndUpdatesTimelineFilter()
     {
         var vm = new MainWindowViewModel(new StubAppSettingsService(), new StubTimelineService());
         var changes = new List<string?>();
@@ -47,7 +48,26 @@ public class MainWindowViewModelTests
 
         Assert.Contains(nameof(MainWindowViewModel.SelectedTab), changes);
         Assert.Equal(MainWindowViewModel.TabReview, vm.SelectedTab);
+
+        // OnSelectedTabChanged debounces (~60 ms) before pushing the new
+        // Tab into Timeline.Filter to coalesce rapid A/S cycling. Wait
+        // out the debounce window before asserting the filter applied.
+        await WaitUntil(() => vm.Timeline.CurrentFilter == "Review", TimeSpan.FromSeconds(2));
         Assert.Equal("Review", vm.Timeline.CurrentFilter);
+    }
+
+    private static async Task WaitUntil(Func<bool> condition, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition()) return;
+            await Task.Delay(20).ConfigureAwait(false);
+        }
+        // Throw instead of silently returning so a test that depends on
+        // the condition fails loudly with "timed out" rather than
+        // continuing to a misleading assertion failure on the next line.
+        throw new TimeoutException($"WaitUntil condition not satisfied within {timeout.TotalMilliseconds:F0} ms");
     }
 
     [Fact]

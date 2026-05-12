@@ -117,4 +117,7 @@ internal sealed class FakeGitHubApiClient : IGitHubApiClient
 
     public Task<(string? Body, string? AuthorLogin)> GetSubjectBodyAndAuthorAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
         => Task.FromResult<(string?, string?)>((null, null));
+
+    public Task<(string? Body, string? AuthorLogin, DateTimeOffset? CreatedAt)> GetSubjectMetaAsync(string pat, string subjectApiUrl, CancellationToken ct = default)
+        => Task.FromResult<(string?, string?, DateTimeOffset?)>((null, null, null));
 }

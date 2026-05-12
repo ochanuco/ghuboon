@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
@@ -102,8 +103,17 @@ public partial class App : Application
         var syncStateRepo = new SyncStateRepository(dbFactory);
         var settingsRepo = new AppSettingsRepository(dbFactory);
 
-        // 4. HttpClient + GitHub API client.
-        _httpClient = new HttpClient();
+        // 4. HttpClient + GitHub API client. Default Timeout is 100 s
+        // which is way too long for any single request in our foreach
+        // (sync's per-iter actor lookup, PR-anchor synthesis, body
+        // fetch on row click). A slow GitHub response would otherwise
+        // hold the sync gate for minutes. 15 s is well above the
+        // p99 of /pulls/{n} / /comments/{id} and short enough that a
+        // network stall recovers in the next poll cycle.
+        _httpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(15),
+        };
         _logger = GhuboonLogger.Create();
         var apiClient = new GitHubApiClient(_httpClient, _logger);
 
@@ -133,9 +143,28 @@ public partial class App : Application
         {
             try
             {
+                var bannerStartedAt = DateTimeOffset.UtcNow;
+                _logger?.Information(
+                    "banner.dispatch.start account={AccountId} candidateCount={CandidateCount}",
+                    ev.AccountId,
+                    ev.HighPriorityNew.Count);
                 var toShow = await notifyGate
                     .FilterAsync(ev.AccountId, ev.HighPriorityNew)
                     .ConfigureAwait(false);
+                _logger?.Information(
+                    "banner.dispatch.afterGate account={AccountId} acceptedCount={AcceptedCount} suppressedCount={SuppressedCount} gateMs={GateMs:F0}",
+                    ev.AccountId,
+                    toShow.Count,
+                    ev.HighPriorityNew.Count - toShow.Count,
+                    (DateTimeOffset.UtcNow - bannerStartedAt).TotalMilliseconds);
+                // Fire every banner in parallel: each osascript spawn is
+                // ~50–200 ms and macOS's UserNotificationCenter queues
+                // them anyway, so serializing with `await ShowAsync`
+                // inside the foreach used to mean 5 banners = 5×spawn
+                // serially while the TL had already rendered the new
+                // rows. Letting them run concurrently keeps banner
+                // latency closer to the single-banner case.
+                var dispatched = new List<Task>(toShow.Count);
                 foreach (var n in toShow)
                 {
                     var dn = new DesktopNotification(
@@ -143,7 +172,11 @@ public partial class App : Application
                         Title: $"{n.Reason}: {n.RepositoryFullName}",
                         Body: n.Subject.Title,
                         Url: n.Subject.WebUrl);
-                    await notifyService.ShowAsync(dn).ConfigureAwait(false);
+                    dispatched.Add(notifyService.ShowAsync(dn));
+                }
+                if (dispatched.Count > 0)
+                {
+                    await Task.WhenAll(dispatched).ConfigureAwait(false);
                 }
             }
             catch (Exception ex)
@@ -158,6 +191,12 @@ public partial class App : Application
         // 8. Per-row context for read-state actions.
         var browser = new Browser();
         var clipboard = new AvaloniaClipboard();
+        IBookmarkRepository bookmarks = new BookmarkRepository(dbFactory);
+        // Late-bound reference so each per-row context can route its
+        // user-facing acks ("Copied" / "Bookmarked" / ...) into the
+        // window's status bar. We can't capture the VM directly because
+        // the factory is consumed before construction returns the VM.
+        MainWindowViewModel? mainVmRef = null;
         TimelineItemContext ItemCtxFactory()
         {
             return new TimelineItemContext(
@@ -174,7 +213,9 @@ public partial class App : Application
                     return await credentialStore.GetAsync(account.CredentialKey, ct).ConfigureAwait(false);
                 },
                 OnMarkRead: null,
-                Log: _logger);
+                Log: _logger,
+                Bookmarks: bookmarks,
+                OnFlash: msg => mainVmRef?.ShowFlash(msg));
         }
 
         // 9. Timeline service backed by the event-log cache.
@@ -207,11 +248,15 @@ public partial class App : Application
                 var account = await appSettings.GetPrimaryAccountAsync().ConfigureAwait(false);
                 return account?.Id;
             },
-            settingsViewModel: settingsVm)
+            settingsViewModel: settingsVm,
+            bookmarks: bookmarks,
+            bookmarkAccountId: AppSettingsService.PrimaryAccountId)
         {
             RepositoriesSource = timelineService,
             UiDispatcher = action => Dispatcher.UIThread.Post(action),
+            AppSettingsStore = settingsRepo,
         };
+        mainVmRef = vm;
 
         return vm;
     }

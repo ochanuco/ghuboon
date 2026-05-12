@@ -461,5 +461,20 @@ internal static class Migrations
                  ALTER TABLE notification_events ADD COLUMN body TEXT;
                  ALTER TABLE notification_events ADD COLUMN body_author_login TEXT;
                  """),
+
+        // ----------------------------------------------------------------
+        // Migration v9 (bookmarks):
+        //   Users want to keep a flagged list of notifications across syncs
+        //   (analogous to OpenTween's Fav). Bookmarks are per-thread, so
+        //   they live on notification_local_states (already keyed by
+        //   account_id + notification_id) rather than the append-only
+        //   event log. A timestamp on the column doubles as "when was
+        //   this bookmarked" for any future "sort by bookmark date" UI.
+        new Migration(
+            Version: 9,
+            Name: "bookmark_columns",
+            Sql: """
+                 ALTER TABLE notification_local_states ADD COLUMN bookmarked_at TEXT;
+                 """),
     };
 }

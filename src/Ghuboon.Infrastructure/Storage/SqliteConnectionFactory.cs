@@ -28,6 +28,14 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private bool _migrationsApplied;
 
+    // Cache the resolved DB key in memory so we don't shell out to the
+    // macOS `security` tool on EVERY connection open. Each spawn is
+    // ~50-100 ms, and the sync foreach opens 3 connections per row
+    // (GetById / Upsert / TryAppend), which compounded to ~2 s per
+    // observation in production logs and pushed the whole sync past
+    // the 60 s poll interval.
+    private string? _cachedKey;
+
     /// <summary>
     /// Production constructor: uses the platform default DB path under the
     /// app data directory.
@@ -73,7 +81,14 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
             DataSource = _databasePath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Default,
-            Pooling = false,
+            // Microsoft.Data.Sqlite pools physical connections by
+            // default (Pooling=true). Set it explicitly here so the
+            // contract is visible at the callsite: the sync foreach
+            // opens 3 connections per row and each fresh SQLite
+            // handle would run PRAGMA key (PBKDF2 key derivation,
+            // ~100 ms), so pool-reuse avoids ~10 s per pass on a
+            // 35-row account.
+            Pooling = true,
         }.ToString();
 
         var connection = new SqliteConnection(connectionString);
@@ -120,16 +135,40 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
 
     private async Task<string> ResolveOrCreateKeyAsync(CancellationToken ct)
     {
-        var existing = await _credentialStore.GetAsync(_credentialKey, ct).ConfigureAwait(false);
-        if (!string.IsNullOrEmpty(existing))
+        // Memory-cache the key after first resolution. The credential
+        // store backs onto the macOS `security` CLI in production, which
+        // is a process spawn per call (~50-100 ms). Caching turns the
+        // per-connection fetch into a field read.
+        if (_cachedKey is not null)
         {
-            return existing;
+            return _cachedKey;
         }
 
-        var bytes = RandomNumberGenerator.GetBytes(32);
-        var encoded = Convert.ToBase64String(bytes);
-        await _credentialStore.SetAsync(_credentialKey, encoded, ct).ConfigureAwait(false);
-        return encoded;
+        await _initLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_cachedKey is not null)
+            {
+                return _cachedKey;
+            }
+
+            var existing = await _credentialStore.GetAsync(_credentialKey, ct).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(existing))
+            {
+                _cachedKey = existing;
+                return existing;
+            }
+
+            var bytes = RandomNumberGenerator.GetBytes(32);
+            var encoded = Convert.ToBase64String(bytes);
+            await _credentialStore.SetAsync(_credentialKey, encoded, ct).ConfigureAwait(false);
+            _cachedKey = encoded;
+            return encoded;
+        }
+        finally
+        {
+            _initLock.Release();
+        }
     }
 
     private static async Task ApplyEncryptionPragmasAsync(DbConnection connection, string key, CancellationToken ct)
@@ -154,6 +193,29 @@ public sealed class SqliteConnectionFactory : IDbConnectionFactory
         // declarations in Migrations.cs are recorded but inert.
         await connection.ExecuteAsync(new CommandDefinition(
             "PRAGMA foreign_keys = ON;",
+            cancellationToken: ct)).ConfigureAwait(false);
+
+        // Switch the database to WAL so the UI mark-read path (writer)
+        // can run concurrently with the sync foreach (writer/reader)
+        // and TL reload (reader) without producing "database is
+        // locked" SqliteExceptions. journal_mode is a DB-level setting
+        // that persists across connections, so this is effectively a
+        // first-open cost; we issue it every open anyway because the
+        // pragma is harmless when WAL is already active and we don't
+        // want a one-shot init path that could be skipped under
+        // pooling.
+        await connection.ExecuteAsync(new CommandDefinition(
+            "PRAGMA journal_mode = WAL;",
+            cancellationToken: ct)).ConfigureAwait(false);
+
+        // busy_timeout is per-connection: when a writer holds the lock,
+        // other connections that try to write will wait up to 5 s
+        // (SQLite retries internally) instead of failing immediately.
+        // Combined with WAL this turns the previous "database is
+        // locked" crashes from the foreach vs. mark-read race into a
+        // brief block until the prior write commits.
+        await connection.ExecuteAsync(new CommandDefinition(
+            "PRAGMA busy_timeout = 5000;",
             cancellationToken: ct)).ConfigureAwait(false);
     }
 

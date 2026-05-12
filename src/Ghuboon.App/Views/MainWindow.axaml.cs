@@ -1,4 +1,7 @@
+using System;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -9,6 +12,20 @@ namespace Ghuboon.App.Views;
 
 public partial class MainWindow : Window
 {
+    // Cache the timeline ListBox / detail ScrollViewer so hot-path key
+    // handlers don't rescan the visual tree on every press. The window
+    // template is stable, so a single lookup on first use is enough.
+    private ListBox? _timelineList;
+    private ScrollViewer? _detailScroll;
+
+    private ListBox? TimelineList()
+        => _timelineList ??= this.GetVisualDescendants()
+            .OfType<ListBox>()
+            .FirstOrDefault(b => b.Name == "ItemsList");
+
+    private ScrollViewer? DetailScroll()
+        => _detailScroll ??= this.FindControl<ScrollViewer>("DetailScrollViewer");
+
     public MainWindow()
     {
         InitializeComponent();
@@ -19,6 +36,89 @@ public partial class MainWindow : Window
         // open right after our jump-to-unread runs. Same gating as
         // OnKeyDown: skip when a TextBox owns focus, otherwise eat it.
         AddHandler(KeyUpEvent, OnKeyUp, RoutingStrategies.Tunnel);
+
+        Opened += OnWindowOpened;
+        Closing += OnWindowClosing;
+        // Debounce live position / size changes so dragging the window
+        // doesn't write to the encrypted DB on every pixel.
+        PositionChanged += (_, _) => ScheduleSaveBounds();
+        PropertyChanged += (_, e) =>
+        {
+            if (e.Property == WidthProperty || e.Property == HeightProperty)
+            {
+                ScheduleSaveBounds();
+            }
+        };
+    }
+
+    private CancellationTokenSource? _boundsSaveCts;
+
+    private async void OnWindowOpened(object? sender, EventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        var bounds = await vm.TryLoadWindowBoundsAsync().ConfigureAwait(true);
+        if (bounds is null) return;
+        var (x, y, w, h) = bounds.Value;
+        Width = w;
+        Height = h;
+        Position = new Avalonia.PixelPoint((int)x, (int)y);
+    }
+
+    private void OnWindowClosing(object? sender, Avalonia.Controls.WindowClosingEventArgs e)
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+
+        // Cancel + dispose the pending debounce so the background task
+        // we kicked off on the last drag doesn't race the final save
+        // below. Without this the 600 ms delay could fire after we
+        // already wrote the closing bounds and clobber them with stale
+        // capturedPos / capturedW / capturedH values.
+        var pending = _boundsSaveCts;
+        _boundsSaveCts = null;
+        pending?.Cancel();
+        pending?.Dispose();
+
+        // Final save must complete before process exit so the next
+        // launch picks up the actual closing bounds, not the last
+        // mid-drag snapshot. SetAsync is a single SQLite UPSERT
+        // (sub-ms with our connection-pool warm path).
+        try
+        {
+            vm.SaveWindowBoundsAsync(Position.X, Position.Y, Width, Height)
+                .GetAwaiter().GetResult();
+        }
+        catch { /* best-effort; we're already shutting down */ }
+    }
+
+    private void ScheduleSaveBounds()
+    {
+        if (DataContext is not MainWindowViewModel vm || vm.AppSettingsStore is null) return;
+        // Coalesce live drag / resize events into a single save at the
+        // tail of a quiet 600 ms window. The save still runs on the
+        // thread pool so the UI thread isn't blocked on the DB write.
+        var previous = _boundsSaveCts;
+        var cts = new CancellationTokenSource();
+        _boundsSaveCts = cts;
+        previous?.Cancel();
+        previous?.Dispose();
+
+        var capturedPos = Position;
+        var capturedW = Width;
+        var capturedH = Height;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(600), cts.Token).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) { return; }
+            if (cts.IsCancellationRequested) return;
+            try
+            {
+                await vm.SaveWindowBoundsAsync(capturedPos.X, capturedPos.Y, capturedW, capturedH).ConfigureAwait(false);
+            }
+            catch { /* non-fatal */ }
+        });
     }
 
     private void OnKeyUp(object? sender, KeyEventArgs e)
@@ -133,27 +233,60 @@ public partial class MainWindow : Window
                 JumpToKind(-1, Core.Domain.NotificationEventKind.PullRequest, Core.Domain.NotificationEventKind.Comment);
                 e.Handled = true;
                 break;
+            // Bookmarks (mirrors OpenTween's Ctrl+S = Fav add,
+            // Ctrl+Shift+S = Fav remove):
+            //   * Cmd+S (macOS) / Ctrl+S (Win, Linux): bookmark
+            //   * Cmd+Shift+S (macOS) / Ctrl+Shift+S (Win, Linux): clear
+            // KeyModifiers.Meta is Command on macOS; KeyModifiers.Control
+            // is Ctrl cross-platform. We accept either modifier family so
+            // the same chord works on both Mac and Windows.
+            case Key.S when e.KeyModifiers == KeyModifiers.Meta:
+            case Key.S when e.KeyModifiers == KeyModifiers.Control:
+                BookmarkSelected();
+                e.Handled = true;
+                break;
+            case Key.S when e.KeyModifiers == (KeyModifiers.Shift | KeyModifiers.Meta):
+            case Key.S when e.KeyModifiers == (KeyModifiers.Shift | KeyModifiers.Control):
+                UnbookmarkSelected();
+                e.Handled = true;
+                break;
+        }
+    }
+
+    private void BookmarkSelected()
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (vm.Timeline.SelectedItem is not { } item) return;
+        if (item.BookmarkCommand.CanExecute(null))
+        {
+            item.BookmarkCommand.Execute(null);
+        }
+    }
+
+    private void UnbookmarkSelected()
+    {
+        if (DataContext is not MainWindowViewModel vm) return;
+        if (vm.Timeline.SelectedItem is not { } item) return;
+        if (item.UnbookmarkCommand.CanExecute(null))
+        {
+            item.UnbookmarkCommand.Execute(null);
         }
     }
 
     private void FocusTimeline()
     {
-        var list = this.GetVisualDescendants()
-            .OfType<ListBox>()
-            .FirstOrDefault(b => b.Name == "ItemsList");
-        list?.Focus();
+        TimelineList()?.Focus();
     }
 
     private void FocusDetail()
     {
-        var scroll = this.FindControl<ScrollViewer>("DetailScrollViewer");
-        scroll?.Focus();
+        DetailScroll()?.Focus();
     }
 
     private bool IsDetailFocused()
     {
         var focused = FocusManager?.GetFocusedElement() as Avalonia.Visual;
-        var scroll = this.FindControl<ScrollViewer>("DetailScrollViewer");
+        var scroll = DetailScroll();
         if (scroll is null || focused is null)
         {
             return false;
@@ -168,7 +301,7 @@ public partial class MainWindow : Window
 
     private void ScrollDetail(int direction)
     {
-        var scroll = this.FindControl<ScrollViewer>("DetailScrollViewer");
+        var scroll = DetailScroll();
         if (scroll is null)
         {
             return;
@@ -220,9 +353,7 @@ public partial class MainWindow : Window
         // subsequent Up/Down arrow presses route here too rather than
         // triggering Avalonia's directional focus traversal (which used
         // to land on the repo-filter toggle from the toolbar).
-        var list = this.GetVisualDescendants()
-            .OfType<ListBox>()
-            .FirstOrDefault(b => b.Name == "ItemsList");
+        var list = TimelineList();
         list?.ScrollIntoView(items[next]);
         list?.Focus();
     }
@@ -252,9 +383,7 @@ public partial class MainWindow : Window
                      ?? items[^1];
         vm.Timeline.SelectedItem = target;
 
-        var list = this.GetVisualDescendants()
-            .OfType<ListBox>()
-            .FirstOrDefault(b => b.Name == "ItemsList");
+        var list = TimelineList();
         list?.ScrollIntoView(target);
         list?.Focus();
     }
@@ -302,10 +431,7 @@ public partial class MainWindow : Window
             if (System.Array.IndexOf(kinds, item.EventKind) >= 0)
             {
                 vm.Timeline.SelectedItem = item;
-                var list = this.GetVisualDescendants()
-                    .OfType<ListBox>()
-                    .FirstOrDefault(b => b.Name == "ItemsList");
-                list?.ScrollIntoView(item);
+                TimelineList()?.ScrollIntoView(item);
                 return;
             }
         }
@@ -326,5 +452,13 @@ public partial class MainWindow : Window
         var next = current < 0 ? 0 : current + delta;
         next = ((next % tabs.Count) + tabs.Count) % tabs.Count;
         vm.SelectedTab = tabs[next];
+
+        // Pull focus to the timeline ListBox. Otherwise focus stays on
+        // the bottom Tabs ListBox after a mouse click on a tab name,
+        // and that ListBox's incremental letter-search swallows
+        // subsequent A/S key presses (or fights with our tunnel handler
+        // on every press), which the user perceives as a lag specific
+        // to whichever tab they last clicked into.
+        TimelineList()?.Focus();
     }
 }

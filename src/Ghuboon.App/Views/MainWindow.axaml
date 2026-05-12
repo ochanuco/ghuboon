@@ -299,6 +299,20 @@
                            VerticalAlignment="Center"
                            Opacity="0.7" />
 
+                <!-- Transient acknowledgement ("Bookmarked" / "Copied" / ...).
+                     Lives in the elastic `*` column so it never crowds out
+                     the fixed metadata on either side; auto-clears after a
+                     few seconds. -->
+                <TextBlock Grid.Column="3"
+                           Text="{Binding FlashText}"
+                           FontSize="11"
+                           Margin="16,0"
+                           VerticalAlignment="Center"
+                           HorizontalAlignment="Center"
+                           FontStyle="Italic"
+                           Opacity="0.85"
+                           IsVisible="{Binding FlashText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+
                 <TextBlock Grid.Column="4"
                            Text="{Binding RateLimitText}"
                            FontSize="11"

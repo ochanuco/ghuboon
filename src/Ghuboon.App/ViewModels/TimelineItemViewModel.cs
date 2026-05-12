@@ -52,10 +52,12 @@ public sealed record TimelineItemContext(
     IClock? Clock,
     Func<CancellationToken, Task<string?>>? PatProvider,
     Action<TimelineItemViewModel>? OnMarkRead,
-    ILogger? Log)
+    ILogger? Log,
+    IBookmarkRepository? Bookmarks = null,
+    Action<string>? OnFlash = null)
 {
     public static TimelineItemContext Empty { get; } =
-        new(null, null, null, null, null, null, null, null, null);
+        new(null, null, null, null, null, null, null, null, null, null, null);
 }
 
 /// <summary>
@@ -80,6 +82,22 @@ public partial class TimelineItemViewModel : ViewModelBase
 
     [ObservableProperty]
     private string? _flashMessage;
+
+    /// <summary>
+    /// Set <see cref="FlashMessage"/> and also surface the message to the
+    /// window status bar via <see cref="TimelineItemContext.OnFlash"/>.
+    /// User-facing acks like "Copied" / "Bookmarked" / read-sync failure
+    /// flow through here so the user sees them in a single, stable
+    /// location instead of (or in addition to) the per-row hint.
+    /// </summary>
+    private void Flash(string? message)
+    {
+        FlashMessage = message;
+        if (!string.IsNullOrEmpty(message))
+        {
+            _ctx.OnFlash?.Invoke(message);
+        }
+    }
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasNoBodyAfterLoad))]
@@ -131,6 +149,15 @@ public partial class TimelineItemViewModel : ViewModelBase
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(RowBackgroundColor))]
     private bool _isRelatedToFocus;
+
+    /// <summary>
+    /// True when the user has bookmarked this thread. Driven by the
+    /// Bookmarks tab filter and the Shift+S / Shift+Cmd+S shortcuts.
+    /// Hydrated from <see cref="IBookmarkRepository"/> on each timeline
+    /// reload so the flag survives sync.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isBookmarked;
 
     /// <summary>
     /// Background tint for the timeline row, in priority order:
@@ -392,36 +419,35 @@ public partial class TimelineItemViewModel : ViewModelBase
         // The independent I/O paths (API + notifications row + event-log
         // siblings) then run in parallel. A failed API call reverts Unread
         // and surfaces a flash; local DB failures stay non-fatal.
-        // Awaiting the WhenAll keeps the RelayCommand "in-flight" while
-        // the network call finishes (so a rapid second click is still
-        // suppressed via the in-flight slot) without making the user wait
-        // for the visible state.
+        //
+        // The flip happens BEFORE the first await so the Keychain PAT
+        // lookup (~tens of ms per call on macOS) doesn't introduce a
+        // visible delay between keypress and unread dot disappearing.
+        // If the prerequisites turn out to be missing (no PAT / Api /
+        // ThreadId) or the API call fails, the flip is reverted below.
+        var canRevert = Unread;
+        var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
+        Unread = false;
+        FlashMessage = null;
+        _ctx.OnMarkRead?.Invoke(this);
+
         try
         {
             var pat = _ctx.PatProvider is null ? null : await _ctx.PatProvider(ct).ConfigureAwait(true);
-            var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
 
-            // Only flip optimistically when we can also push the change
-            // upstream. Without a working PAT / API / ThreadId the local
-            // cache would drift ahead of GitHub's actual state and stay
-            // marked-read even though we never PATCH'd /notifications, so
-            // the next sync would either reopen the row or leave the user
-            // wondering why their fix never landed. CR feedback: don't
-            // start the optimistic update when upstream isn't reachable.
+            // Without a working PAT / API / ThreadId the local cache
+            // would drift ahead of GitHub's actual state and stay
+            // marked-read even though we never PATCH'd /notifications,
+            // so revert the optimistic flip and surface a hint.
             var canPushUpstream = _ctx.Api is not null
                 && !string.IsNullOrEmpty(pat)
                 && !string.IsNullOrEmpty(ThreadId);
 
-            if (canPushUpstream)
-            {
-                Unread = false;
-                FlashMessage = null;
-                _ctx.OnMarkRead?.Invoke(this);
-            }
-            else
+            if (!canPushUpstream)
             {
                 _ctx.Log?.Information("Mark-as-read skipped: missing PAT / Api / ThreadId for {NotificationId}", NotificationId);
-                FlashMessage = "Sign in to mark read on GitHub; local state unchanged.";
+                if (canRevert) Unread = true;
+                Flash("Sign in to mark read on GitHub; local state unchanged.");
                 return;
             }
 
@@ -441,7 +467,7 @@ public partial class TimelineItemViewModel : ViewModelBase
             {
                 _ctx.Log?.Warning(ex, "Mark-as-read API call failed for {ThreadId}", ThreadId);
                 Unread = true;
-                FlashMessage = "Read sync failed; will retry on next sync.";
+                Flash("Read sync failed; will retry on next sync.");
                 return;
             }
 
@@ -522,7 +548,7 @@ public partial class TimelineItemViewModel : ViewModelBase
         }
 
         await _ctx.Clipboard.SetTextAsync(WebUrl).ConfigureAwait(false);
-        FlashMessage = "Copied";
+        Flash("Copied");
     }
 
     [RelayCommand]
@@ -539,7 +565,52 @@ public partial class TimelineItemViewModel : ViewModelBase
             ? n.ToString(System.Globalization.CultureInfo.InvariantCulture)
             : Id;
         await _ctx.Clipboard.SetTextAsync(label).ConfigureAwait(false);
-        FlashMessage = $"Copied event id {label}";
+        Flash($"Copied event id {label}");
+    }
+
+    /// <summary>
+    /// Bookmark this thread so it shows in the Bookmarks tab. Optimistic:
+    /// we flip <see cref="IsBookmarked"/> on the UI thread first, then
+    /// persist; if the DB write fails we log but don't revert because the
+    /// next reload reads from the DB and reconciles automatically.
+    /// </summary>
+    [RelayCommand(AllowConcurrentExecutions = false)]
+    private async Task BookmarkAsync(CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(NotificationId) || string.IsNullOrEmpty(AccountId)) return;
+        if (_ctx.Bookmarks is null) return;
+        if (IsBookmarked) return; // idempotent
+
+        IsBookmarked = true;
+        Flash("Bookmarked");
+        try
+        {
+            var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
+            await _ctx.Bookmarks.SetAsync(AccountId, NotificationId, now, ct).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _ctx.Log?.Warning(ex, "Persisting bookmark failed for {NotificationId}", NotificationId);
+        }
+    }
+
+    [RelayCommand(AllowConcurrentExecutions = false)]
+    private async Task UnbookmarkAsync(CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(NotificationId) || string.IsNullOrEmpty(AccountId)) return;
+        if (_ctx.Bookmarks is null) return;
+        if (!IsBookmarked) return; // idempotent
+
+        IsBookmarked = false;
+        Flash("Bookmark removed");
+        try
+        {
+            await _ctx.Bookmarks.ClearAsync(AccountId, NotificationId, ct).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _ctx.Log?.Warning(ex, "Clearing bookmark failed for {NotificationId}", NotificationId);
+        }
     }
 
     /// <summary>
