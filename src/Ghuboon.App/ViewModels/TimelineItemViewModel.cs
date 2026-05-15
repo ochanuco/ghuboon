@@ -623,6 +623,44 @@ public partial class TimelineItemViewModel : ViewModelBase
         if (_bodyAttempted) return;
         _bodyAttempted = true;
 
+        // Hard deadline independent of HttpClient.Timeout. The handler-
+        // level timeout uses System.Threading.Timer which got disrupted
+        // across macOS sleep on 2026-05-14, so an HTTP request that
+        // straddled sleep could hang the body load forever — the UI
+        // stayed pinned at "loading" with no resolution. CancelAfter
+        // here is a backup deadline rooted in our linked CTS; if the
+        // chain isn't done in 10 s we abandon, mark BodyLoaded so the
+        // detail pane settles, and the next selection of the same row
+        // will retry (we reset _bodyAttempted on cancellation).
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(TimeSpan.FromSeconds(10));
+        var lct = deadline.Token;
+        try
+        {
+            await EnsureBodyLoadedCoreAsync(lct).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            // Catch both deadline-triggered and user-triggered cancellation
+            // so neither escapes the fire-and-forget Task.Run from the
+            // selection-changed handler (where escapes become unobserved
+            // task exceptions). Inner EnsureBodyLoadedCoreAsync already
+            // settles state in its own OCE catch; this is defense in
+            // depth for the path where the inner catch's filter rejects
+            // (e.g., future code that doesn't re-link the inner ct).
+            _bodyAttempted = false;
+            IsLoadingBody = false;
+            BodyLoaded = true;
+            if (deadline.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                _ctx.Log?.Information("EnsureBodyLoadedAsync deadline (10 s) for {NotificationId}", NotificationId);
+            }
+        }
+    }
+
+    private async Task EnsureBodyLoadedCoreAsync(CancellationToken ct)
+    {
+
         // Fallback chain for legacy rows that lost SubjectApiUrl:
         //  1) read the canonical notifications row from the cache
         //  2) re-fetch via GET /notifications/threads/{thread_id} (reliable
@@ -774,8 +812,15 @@ public partial class TimelineItemViewModel : ViewModelBase
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // ignore; selection moved before the fetch finished.
+            // Cancellation here covers both the outer user CT (selection
+            // moved away) AND the 10 s deadline applied in the wrapper.
+            // Settle the row in either case: the moved-away row is no
+            // longer visible so it doesn't matter, but the deadline case
+            // needs BodyLoaded=true so the still-visible row exits the
+            // loading spinner state. _bodyAttempted=false allows retry
+            // on the next selection.
             _bodyAttempted = false;
+            BodyLoaded = true;
         }
         catch (Exception ex)
         {
