@@ -42,6 +42,16 @@ public partial class MainWindowViewModel : ViewModelBase, IDisposable
     /// </summary>
     public Ghuboon.Core.Abstractions.IAppSettingsRepository? AppSettingsStore { get; init; }
 
+    /// <summary>
+    /// Bundled UI / blocking-I/O schedulers used by the upcoming
+    /// threading refactor. Wired by the composition root and held here
+    /// so the same instance can propagate to Timeline / TimelineItem
+    /// VMs as their call sites migrate off the ad-hoc RunOnUi /
+    /// Task.Run helpers. Null in unit tests; consumers should fall
+    /// back to inline scheduling when null until the migration lands.
+    /// </summary>
+    public Ghuboon.App.Threading.ThreadingScheduler? Threading { get; init; }
+
     private const string WindowBoundsKey = "window.bounds";
 
     public async Task<(double X, double Y, double Width, double Height)?> TryLoadWindowBoundsAsync(CancellationToken ct = default)
