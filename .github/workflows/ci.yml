@@ -30,8 +30,17 @@ jobs:
       - name: Build
         run: dotnet build --configuration Release --no-restore
 
-      - name: Test
-        run: dotnet test --configuration Release --no-build --logger "trx;LogFileName=test-results.trx"
+      # Two test invocations so the Avalonia headless smoke runs in a
+      # fresh test-host process. Booting the headless dispatcher claims
+      # Dispatcher.UIThread; if a non-headless test in the same process
+      # already touched Avalonia statics, SetupUnsafe fails on
+      # VerifyAccess. Splitting by Category=Headless gives each set its
+      # own process.
+      - name: Test (non-headless)
+        run: dotnet test --configuration Release --no-build --filter "Category!=Headless" --logger "trx;LogFileName=test-results.trx"
+
+      - name: Test (headless E2E)
+        run: dotnet test --configuration Release --no-build --filter "Category=Headless" --logger "trx;LogFileName=test-results-headless.trx"
 
       - name: Upload test results
         if: always()
