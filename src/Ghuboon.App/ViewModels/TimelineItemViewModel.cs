@@ -639,14 +639,22 @@ public partial class TimelineItemViewModel : ViewModelBase
         {
             await EnsureBodyLoadedCoreAsync(lct).ConfigureAwait(true);
         }
-        catch (OperationCanceledException) when (deadline.IsCancellationRequested && !ct.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            // We hit the deadline rather than user cancellation. Surface
-            // a stable empty state and allow retry on the next select.
+            // Catch both deadline-triggered and user-triggered cancellation
+            // so neither escapes the fire-and-forget Task.Run from the
+            // selection-changed handler (where escapes become unobserved
+            // task exceptions). Inner EnsureBodyLoadedCoreAsync already
+            // settles state in its own OCE catch; this is defense in
+            // depth for the path where the inner catch's filter rejects
+            // (e.g., future code that doesn't re-link the inner ct).
             _bodyAttempted = false;
             IsLoadingBody = false;
             BodyLoaded = true;
-            _ctx.Log?.Information("EnsureBodyLoadedAsync deadline (10 s) for {NotificationId}", NotificationId);
+            if (deadline.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                _ctx.Log?.Information("EnsureBodyLoadedAsync deadline (10 s) for {NotificationId}", NotificationId);
+            }
         }
     }
 
