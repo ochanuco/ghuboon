@@ -74,9 +74,19 @@ public partial class TimelineViewModel : ViewModelBase
     private TimelineItemViewModel? _detailItem;
 
     private bool _repaintingTints;
+    private CancellationTokenSource? _renderDeferCts;
 
     partial void OnSelectedItemChanged(TimelineItemViewModel? value)
     {
+        // Diagnostic: end-to-end timing of the synchronous part of the
+        // handler. Anything we do here blocks the UI; if the
+        // user-reported "Detail hang" turns out to be in the tint
+        // repaint or the DetailItem-bound rebind, this log will show
+        // it. Written via System.Diagnostics.Debug because
+        // TimelineViewModel doesn't carry a Serilog reference; the
+        // attached debugger / `log stream` window will capture it.
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
         // Repaint per-row tints: selected row gets blue, same-thread
         // siblings get soft green, every other row drops both flags.
         // Operate on the master cache so rows that are filtered out of
@@ -107,18 +117,78 @@ public partial class TimelineViewModel : ViewModelBase
         {
             _repaintingTints = false;
         }
+        var tintMs = sw.ElapsedMilliseconds;
 
         if (value is null) return;
-        DetailItem = value;
-        // Lazy-load the PR/Issue body for the detail pane. Fire-and-forget
-        // ON THE THREAD POOL so a slow GitHub fetch (sleep/wake stale
-        // connection, slow PAT keychain prompt, etc.) can't pin the UI
-        // thread. Without Task.Run the synchronous prelude of the async
-        // method runs on the caller (UI) until the first true await, and
-        // we observed UI hangs after macOS sleep where the first DB read
-        // alone took several seconds. EnsureBodyLoadedAsync is idempotent
-        // (guarded by _bodyAttempted) and swallows non-fatal errors.
-        _ = Task.Run(() => value.EnsureBodyLoadedAsync());
+        var totalMs = sw.ElapsedMilliseconds;
+        // Surface to the per-item Log so we capture timing in the
+        // production log file. Captured before the deferred work
+        // schedules so it reflects the synchronous-handler cost only.
+        value.LogSelectionTiming(totalMs, tintMs);
+
+        // Push DetailItem + render-gate + body-load triggers off the
+        // synchronous keyboard-event handler. We Post at Background
+        // priority so Avalonia's UI thread drains pending Input events
+        // (further A/S keystrokes) FIRST and only catches up on the
+        // DetailView rebind once the user pauses. Without this,
+        // every keystroke synchronously rebound every DetailView
+        // binding (title / kind / actor / repo / etc.) and the input
+        // queue felt sluggish even with the 200 ms markdown defer.
+        //
+        // Debounce: each new selection cancels the prior Background
+        // work item via _renderDeferCts. Holding A/S therefore only
+        // commits the FINAL row's DetailItem to the pane, not every
+        // intermediate one.
+        var prev = _renderDeferCts;
+        _renderDeferCts = null;
+        prev?.Cancel();
+        prev?.Dispose();
+        var cts = new CancellationTokenSource();
+        _renderDeferCts = cts;
+        var rowSnapshot = value;
+        rowSnapshot.RenderingAllowed = false;
+
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            if (cts.IsCancellationRequested) return;
+            if (!ReferenceEquals(_renderDeferCts, cts)) return;
+            DetailItem = rowSnapshot;
+            // Fire the body load AFTER the DetailItem rebind so the
+            // detail pane shows its header (title etc.) before we
+            // wait on the network. Pass the same cts.Token so a
+            // selection that moves on cancels the in-flight body
+            // fetch — without that, the previous row's body fetch
+            // kept running and could fight for the HttpClient pool /
+            // SQLCipher connection while the user was already
+            // navigating elsewhere.
+            _ = Task.Run(() => rowSnapshot.EnsureBodyLoadedAsync(cts.Token));
+        }, Avalonia.Threading.DispatcherPriority.Background);
+
+        // Markdown render gate stays on its own ~200 ms timer rooted
+        // in the same CTS so a fresh selection cancels both the
+        // DetailItem-rebind Post and the render flip together.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(200), cts.Token).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) { return; }
+            if (cts.IsCancellationRequested) return;
+            if (!ReferenceEquals(_renderDeferCts, cts)) return;
+            // Avalonia 12's threading model requires INotifyPropertyChanged
+            // notifications on UI-bound properties to be raised on the
+            // UI thread. Setting RenderingAllowed flips RenderableBlocks
+            // which is bound to the DetailView's ItemsControl, so the
+            // setter call has to marshal even though the Task.Delay
+            // itself runs off-UI.
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                if (cts.IsCancellationRequested) return;
+                if (!ReferenceEquals(_renderDeferCts, cts)) return;
+                rowSnapshot.RenderingAllowed = true;
+            });
+        });
     }
 
     public TimelineViewModel()
@@ -509,11 +579,62 @@ public partial class TimelineViewModel : ViewModelBase
 
     private void ReplaceItems(IReadOnlyList<TimelineItemViewModel> rearranged, string? previouslySelectedId)
     {
-        Items.Clear();
-        foreach (var item in rearranged)
+        // Diff-apply against the existing ObservableCollection instead of
+        // Clear() + N × Add(). The clear-then-add pattern fired N+1
+        // NotifyCollectionChanged events for a 200-row reload, and the
+        // ListBox processed each event separately — visible as a TL
+        // flicker / tear on every sync tick. With a diff:
+        //   * Most sync ticks change 0–3 rows, so we emit 0–3 events.
+        //   * Tab / filter switches recycle existing VM refs (kept by
+        //     stable Id in _allItems), so order rearranges produce
+        //     Move events rather than full rebuilds.
+        var targetSet = new HashSet<TimelineItemViewModel>(rearranged, ReferenceEqualityComparer.Instance);
+
+        // 1. Remove rows that are no longer in the target.
+        for (var i = Items.Count - 1; i >= 0; i--)
         {
-            Items.Add(item);
+            if (!targetSet.Contains(Items[i]))
+            {
+                Items.RemoveAt(i);
+            }
         }
+
+        // 2. Walk the target order and reconcile in place. At each index:
+        //    a) if the existing item matches, advance;
+        //    b) if the target already exists later, Move it forward;
+        //    c) otherwise Insert it.
+        for (var i = 0; i < rearranged.Count; i++)
+        {
+            var target = rearranged[i];
+            if (i >= Items.Count)
+            {
+                Items.Add(target);
+                continue;
+            }
+            if (ReferenceEquals(Items[i], target))
+            {
+                continue;
+            }
+            // Scan forward in Items for the target's current position.
+            var existingIdx = -1;
+            for (var j = i + 1; j < Items.Count; j++)
+            {
+                if (ReferenceEquals(Items[j], target))
+                {
+                    existingIdx = j;
+                    break;
+                }
+            }
+            if (existingIdx >= 0)
+            {
+                Items.Move(existingIdx, i);
+            }
+            else
+            {
+                Items.Insert(i, target);
+            }
+        }
+
         RecomputeAggregates();
 
         // Re-select: prefer the row the user was on; otherwise pick the
