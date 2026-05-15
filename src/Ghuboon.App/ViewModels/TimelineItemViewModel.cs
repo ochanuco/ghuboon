@@ -1049,19 +1049,9 @@ public partial class TimelineItemViewModel : ViewModelBase, Ghuboon.App.Services
             // don't re-hit the GitHub API for the same row. Only writes
             // when we actually got content; an empty fetch leaves the row
             // null so the next selection retries.
-            if (!string.IsNullOrEmpty(sanitizedBody)
-                && _ctx.EventRepository is { } bodyRepo
-                && EventLocalId is { } bodyEventId)
-            {
-                try
-                {
-                    await bodyRepo.SetBodyAsync(bodyEventId, sanitizedBody, bodyAuthor, ct).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    _ctx.Log?.Information(ex, "Persisting body for event {EventId} failed (non-fatal)", bodyEventId);
-                }
-            }
+            await TimelineItemPersistence.PersistBodyAsync(
+                _ctx.EventRepository, EventLocalId, sanitizedBody, bodyAuthor, _ctx.Log, ct)
+                .ConfigureAwait(false);
 
             // ActorLogin = the actor of THIS row's content (commenter for
             // Comment kind, creator for PR/Issue kind). Always overwrite
@@ -1071,29 +1061,9 @@ public partial class TimelineItemViewModel : ViewModelBase, Ghuboon.App.Services
                 var authorLogin = bodyAuthor;
                 RunOnUi(() => ActorLogin = authorLogin);
 
-                if (_ctx.EventRepository is { } evRepo && EventLocalId is { } eventId)
-                {
-                    try
-                    {
-                        await evRepo.SetActorLoginAsync(eventId, authorLogin!, ct).ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        _ctx.Log?.Information(ex, "Persisting actor_login for event {EventId} failed (non-fatal)", eventId);
-                    }
-                }
-
-                if (_ctx.Repository is { } notifRepo && !string.IsNullOrEmpty(NotificationId))
-                {
-                    try
-                    {
-                        await notifRepo.SetActorLoginAsync(NotificationId, authorLogin!, ct).ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        _ctx.Log?.Information(ex, "Persisting actor_login for notification {NotificationId} failed (non-fatal)", NotificationId);
-                    }
-                }
+                await TimelineItemPersistence.PersistActorLoginAsync(
+                    _ctx.EventRepository, _ctx.Repository, EventLocalId, NotificationId, authorLogin, _ctx.Log, ct)
+                    .ConfigureAwait(false);
             }
 
             RunOnUi(() => BodyLoaded = true);
