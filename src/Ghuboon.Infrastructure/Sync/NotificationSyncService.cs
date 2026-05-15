@@ -651,12 +651,22 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
             Message: null,
             RateLimit: response.RateLimit);
 
-        // 9. NewNotifications event — fire BEFORE Progress.Completed so the
-        // OS banner is dispatched alongside the timeline reload rather than
-        // racing it. Suppressed only on the FIRST EVER sync (no prior
-        // successful sync) so a fresh install doesn't banner every cached
-        // thread; once we've synced once, every later sync fires and the
-        // gate's per-event dedup keeps re-observations quiet.
+        // 9. Event order: Progress.Completed → NewNotifications. The
+        // user-facing chain we want is "Cron → TL → banner": the
+        // timeline reload (driven by OnSyncProgress(Completed)) should
+        // be QUEUED on the UI dispatcher BEFORE the banner-dispatch
+        // handler starts so the new TL row is visible by the time the
+        // OS banner appears. Previously we fired NewNotifications first
+        // and the banner-induced UI-thread blocks (~1 s, observed via
+        // the watchdog) pushed the TL update behind the banner — the
+        // user saw "通知が先 / TL が後" with significant skew.
+        //
+        // NewNotifications gating unchanged: suppressed on the FIRST
+        // EVER sync so a fresh install doesn't banner every cached
+        // thread; once we've synced once, every later sync fires and
+        // the gate's per-event dedup keeps re-observations quiet.
+        RaiseProgress(accountId, SyncStage.Completed, result2);
+
         if (hasPriorSync && highPriorityNew.Count > 0)
         {
             try
@@ -668,8 +678,6 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
                 _logger?.Warning(ex, "NewNotifications subscriber threw");
             }
         }
-
-        RaiseProgress(accountId, SyncStage.Completed, result2);
 
         return result2;
     }
