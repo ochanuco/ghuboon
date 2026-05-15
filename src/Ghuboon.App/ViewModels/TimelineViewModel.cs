@@ -498,6 +498,13 @@ public partial class TimelineViewModel : ViewModelBase
             }
             if (noChanges)
             {
+                // Still kick the ActorLogin backfill: the prior cts was
+                // cancelled at method entry, so without restarting it
+                // here, rows with missing actor on a quiet account
+                // never resolve on no-op ticks (they'd only catch up
+                // when an actual data change finally fires the UI
+                // batch). CodeRabbit feedback on PR #72.
+                _ = Task.Run(() => BackfillActorLoginsAsync(newAll.ToArray(), cts.Token), cts.Token);
                 return;
             }
 
