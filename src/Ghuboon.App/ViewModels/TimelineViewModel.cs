@@ -120,29 +120,48 @@ public partial class TimelineViewModel : ViewModelBase
         var tintMs = sw.ElapsedMilliseconds;
 
         if (value is null) return;
-        DetailItem = value;
         var totalMs = sw.ElapsedMilliseconds;
         // Surface to the per-item Log so we capture timing in the
-        // production log file (~/Library/Application Support/Ghuboon/
-        // logs/). Anything blocking the UI in OnSelectedItemChanged
-        // shows here.
+        // production log file. Captured before the deferred work
+        // schedules so it reflects the synchronous-handler cost only.
         value.LogSelectionTiming(totalMs, tintMs);
 
-        // Defer the heavy markdown render. RenderingAllowed gates the
-        // ItemsControl's data source (RenderableBlocks). We start it
-        // false on every selection, then flip true ~200 ms later — if
-        // the user moves on within that window the markdown render is
-        // skipped entirely for the intermediate row. The visible header
-        // (title / kind / actor) still updates instantly because those
-        // bindings don't go through RenderableBlocks.
+        // Push DetailItem + render-gate + body-load triggers off the
+        // synchronous keyboard-event handler. We Post at Background
+        // priority so Avalonia's UI thread drains pending Input events
+        // (further A/S keystrokes) FIRST and only catches up on the
+        // DetailView rebind once the user pauses. Without this,
+        // every keystroke synchronously rebound every DetailView
+        // binding (title / kind / actor / repo / etc.) and the input
+        // queue felt sluggish even with the 200 ms markdown defer.
+        //
+        // Debounce: each new selection cancels the prior Background
+        // work item via _renderDeferCts. Holding A/S therefore only
+        // commits the FINAL row's DetailItem to the pane, not every
+        // intermediate one.
         var prev = _renderDeferCts;
         _renderDeferCts = null;
         prev?.Cancel();
         prev?.Dispose();
-        value.RenderingAllowed = false;
         var cts = new CancellationTokenSource();
         _renderDeferCts = cts;
         var rowSnapshot = value;
+        rowSnapshot.RenderingAllowed = false;
+
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            if (cts.IsCancellationRequested) return;
+            if (!ReferenceEquals(_renderDeferCts, cts)) return;
+            DetailItem = rowSnapshot;
+            // Fire the body load AFTER the DetailItem rebind so the
+            // detail pane shows its header (title etc.) before we
+            // wait on the network.
+            _ = Task.Run(() => rowSnapshot.EnsureBodyLoadedAsync());
+        }, Avalonia.Threading.DispatcherPriority.Background);
+
+        // Markdown render gate stays on its own ~200 ms timer rooted
+        // in the same CTS so a fresh selection cancels both the
+        // DetailItem-rebind Post and the render flip together.
         _ = Task.Run(async () =>
         {
             try
@@ -154,16 +173,6 @@ public partial class TimelineViewModel : ViewModelBase
             if (!ReferenceEquals(_renderDeferCts, cts)) return;
             rowSnapshot.RenderingAllowed = true;
         });
-
-        // Lazy-load the PR/Issue body for the detail pane. Fire-and-forget
-        // ON THE THREAD POOL so a slow GitHub fetch (sleep/wake stale
-        // connection, slow PAT keychain prompt, etc.) can't pin the UI
-        // thread. Without Task.Run the synchronous prelude of the async
-        // method runs on the caller (UI) until the first true await, and
-        // we observed UI hangs after macOS sleep where the first DB read
-        // alone took several seconds. EnsureBodyLoadedAsync is idempotent
-        // (guarded by _bodyAttempted) and swallows non-fatal errors.
-        _ = Task.Run(() => value.EnsureBodyLoadedAsync());
     }
 
     public TimelineViewModel()
