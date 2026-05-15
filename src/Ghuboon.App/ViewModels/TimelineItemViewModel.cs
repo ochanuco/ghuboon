@@ -65,7 +65,7 @@ public sealed record TimelineItemContext(
 /// per-row commands (Open in GitHub / Mark as read / Copy URL / Toggle expand).
 /// Read transitions are idempotent (Phase 10).
 /// </summary>
-public partial class TimelineItemViewModel : ViewModelBase
+public partial class TimelineItemViewModel : ViewModelBase, Ghuboon.App.Services.ITimelineProjectionItem
 {
     private readonly TimelineItemContext _ctx;
 
