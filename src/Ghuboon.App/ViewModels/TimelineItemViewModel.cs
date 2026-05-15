@@ -99,9 +99,57 @@ public partial class TimelineItemViewModel : ViewModelBase
         }
     }
 
+    /// <summary>
+    /// Above this length, the detail pane defaults to plain text
+    /// instead of running the full Markdown.Avalonia render pipeline.
+    /// User can flip back to markdown rendering via the toggle button
+    /// next to the body. Picked to be roughly the size where
+    /// MarkdownScrollViewer's UI-thread parse + layout starts to be a
+    /// noticeable hang on cached-row focus.
+    /// </summary>
+    public const int BodyLengthMarkdownThreshold = 5000;
+
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasNoBodyAfterLoad))]
+    [NotifyPropertyChangedFor(nameof(BodyIsLongFormPlainText))]
     private string? _body;
+
+    /// <summary>
+    /// When true, the detail pane shows <see cref="Body"/> as plain
+    /// (selectable) text instead of markdown-rendered content. Set
+    /// automatically based on <see cref="BodyLengthMarkdownThreshold"/>
+    /// when Body arrives; user can toggle via
+    /// <see cref="ToggleBodyRenderModeCommand"/>.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(BodyIsLongFormPlainText))]
+    [NotifyPropertyChangedFor(nameof(BodyShouldShowMarkdown))]
+    [NotifyPropertyChangedFor(nameof(BodyRenderModeLabel))]
+    private bool _bodyDisplayAsPlainText;
+
+    /// <summary>Label for the toggle button — "Plain" or "Markdown".</summary>
+    public string BodyRenderModeLabel => BodyDisplayAsPlainText ? "Plain" : "Markdown";
+
+    /// <summary>
+    /// Convenience: true only when Body exists and we're rendering it
+    /// as plain text. The detail-pane SelectableTextBlock binds to
+    /// this for IsVisible.
+    /// </summary>
+    public bool BodyIsLongFormPlainText =>
+        !string.IsNullOrEmpty(Body) && BodyDisplayAsPlainText;
+
+    /// <summary>
+    /// Inverse: true when Body exists and we should run the markdown
+    /// renderer. The MarkdownScrollViewer column binds to this.
+    /// </summary>
+    public bool BodyShouldShowMarkdown =>
+        !string.IsNullOrEmpty(Body) && !BodyDisplayAsPlainText;
+
+    [RelayCommand]
+    private void ToggleBodyRenderMode()
+    {
+        BodyDisplayAsPlainText = !BodyDisplayAsPlainText;
+    }
 
     // BodyBlocks used to be a getter that re-ran SplitIntoBlocks on every
     // call. Worse, ItemsControl read it once per DataContext change AND
@@ -128,7 +176,7 @@ public partial class TimelineItemViewModel : ViewModelBase
         {
             if (_bodyBlocksDirty)
             {
-                _bodyBlocks = SplitIntoBlocks(_body);
+                _bodyBlocks = SplitIntoBlocks(Body);
                 _bodyBlocksDirty = false;
             }
             return _bodyBlocks;
@@ -148,6 +196,9 @@ public partial class TimelineItemViewModel : ViewModelBase
     partial void OnBodyChanged(string? value)
     {
         BodyBlocks = SplitIntoBlocks(value);
+        // Default rendering mode based on length. The toggle command
+        // lets the user opt back into markdown for a long body.
+        BodyDisplayAsPlainText = (value?.Length ?? 0) > BodyLengthMarkdownThreshold;
     }
 
     // Markdown rendering is heavy (third-party MarkdownScrollViewer
@@ -339,6 +390,11 @@ public partial class TimelineItemViewModel : ViewModelBase
             _bodyBlocksDirty = true;
             _bodyLoaded = true;
             _bodyAttempted = true;
+            // Match OnBodyChanged: long cached bodies open in plain
+            // text by default. Setting the field (not the property)
+            // skips the PropertyChanged fire, which is what we want
+            // here — no listeners exist yet on a fresh VM.
+            _bodyDisplayAsPlainText = source.Body!.Length > BodyLengthMarkdownThreshold;
         }
     }
 
@@ -744,7 +800,7 @@ public partial class TimelineItemViewModel : ViewModelBase
             if (!lct.IsCancellationRequested)
             {
                 _ctx.Log?.Information("body.load.done id={NotificationId} totalMs={Ms} bodyLen={Len}",
-                    NotificationId, totalSw.ElapsedMilliseconds, _body?.Length ?? 0);
+                    NotificationId, totalSw.ElapsedMilliseconds, Body?.Length ?? 0);
             }
         }
         catch (OperationCanceledException)
