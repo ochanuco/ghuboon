@@ -224,11 +224,36 @@
                                Opacity="0.5"
                                FontStyle="Italic"
                                IsVisible="{Binding HasNoBodyAfterLoad, FallbackValue=False}" />
+                    <!-- Body-render-mode toggle. Long bodies open in plain
+                         text to avoid the Markdown.Avalonia render hang;
+                         clicking this button switches to markdown. -->
+                    <Button DockPanel.Dock="Top"
+                            Margin="0,4,0,4"
+                            Padding="6,2"
+                            FontSize="11"
+                            HorizontalAlignment="Left"
+                            Command="{Binding ToggleBodyRenderModeCommand}"
+                            IsVisible="{Binding Body, Converter={x:Static StringConverters.IsNotNullOrEmpty}, FallbackValue=False}"
+                            Content="{Binding BodyRenderModeLabel, StringFormat='Body: {0} ⇄'}" />
+                    <!-- Long-body plain-text branch. SelectableTextBlock
+                         skips the Markdig parse + Avalonia visual tree
+                         build, so bodies above the 5 000-char threshold
+                         (CodeRabbit summaries, sprawling PR descriptions)
+                         scroll instantly. -->
+                    <ScrollViewer Focusable="True"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  VerticalScrollBarVisibility="Auto"
+                                  IsVisible="{Binding BodyIsLongFormPlainText, FallbackValue=False}">
+                        <SelectableTextBlock Text="{Binding Body}"
+                                             TextWrapping="Wrap"
+                                             FontFamily="Menlo, Consolas, monospace"
+                                             FontSize="12" />
+                    </ScrollViewer>
                     <ScrollViewer x:Name="DetailScrollViewer"
                                   Focusable="True"
                                   HorizontalScrollBarVisibility="Disabled"
                                   VerticalScrollBarVisibility="Auto"
-                                  IsVisible="{Binding Body, Converter={x:Static StringConverters.IsNotNullOrEmpty}, FallbackValue=False}">
+                                  IsVisible="{Binding BodyShouldShowMarkdown, FallbackValue=False}">
                         <ItemsControl ItemsSource="{Binding RenderableBlocks}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate DataType="vm:BodyBlock">
