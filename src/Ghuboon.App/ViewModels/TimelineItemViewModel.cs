@@ -773,6 +773,21 @@ public partial class TimelineItemViewModel : ViewModelBase
     public async Task EnsureBodyLoadedAsync(CancellationToken ct = default)
     {
         if (_bodyAttempted) return;
+        // _bodyAttempted is reset on cancellation (deadline / selection
+        // moved away) so a row can retry on the next select. But if a
+        // previous attempt succeeded and produced a Body, the data is
+        // already cached on this VM — skip the network round-trip even
+        // though _bodyAttempted is now false. Without this guard,
+        // re-visiting a previously-loaded row would refetch and could
+        // overwrite the existing Body with null when the second fetch
+        // fails (observed in production: bodyLen=0 after a 7-8 s
+        // timeout on stale connections).
+        if (!string.IsNullOrEmpty(Body))
+        {
+            _bodyAttempted = true;
+            BodyLoaded = true;
+            return;
+        }
         _bodyAttempted = true;
 
         // Hard deadline independent of HttpClient.Timeout. The handler-
@@ -954,15 +969,25 @@ public partial class TimelineItemViewModel : ViewModelBase
             }
 
             var sanitizedBody = StripHtmlComments(content);
-            // Single batched marshal so Body and BodyAuthorLogin (and
-            // the cascading BodyBlocks / BodyDisplayAsPlainText /
-            // BodyIsLongFormPlainText / BodyShouldShowMarkdown notifies)
-            // all hit the binding system together on the UI thread.
-            RunOnUi(() =>
+            // Only apply when we actually got content. An empty fetch
+            // result on a previously-empty row leaves Body null and
+            // the BodyLoaded flip below settles the spinner state;
+            // on a row that already had Body, the early-return guard
+            // at method entry prevents us from reaching here, so this
+            // branch only sees genuinely-new content.
+            if (!string.IsNullOrEmpty(sanitizedBody))
             {
-                Body = sanitizedBody;
-                BodyAuthorLogin = bodyAuthor;
-            });
+                // Single batched marshal so Body and BodyAuthorLogin
+                // (and the cascading BodyBlocks /
+                // BodyDisplayAsPlainText / BodyIsLongFormPlainText /
+                // BodyShouldShowMarkdown notifies) all hit the
+                // binding system together on the UI thread.
+                RunOnUi(() =>
+                {
+                    Body = sanitizedBody;
+                    BodyAuthorLogin = bodyAuthor;
+                });
+            }
 
             // Persist the body to the per-event cache so subsequent renders
             // (next reload, future sessions) read from the local DB and
