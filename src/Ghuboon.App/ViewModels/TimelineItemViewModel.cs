@@ -54,10 +54,11 @@ public sealed record TimelineItemContext(
     Action<TimelineItemViewModel>? OnMarkRead,
     ILogger? Log,
     IBookmarkRepository? Bookmarks = null,
-    Action<string>? OnFlash = null)
+    Action<string>? OnFlash = null,
+    Ghuboon.App.Threading.ThreadingScheduler? Threading = null)
 {
     public static TimelineItemContext Empty { get; } =
-        new(null, null, null, null, null, null, null, null, null, null, null);
+        new(null, null, null, null, null, null, null, null, null, null, null, null);
 }
 
 /// <summary>
@@ -633,7 +634,7 @@ public partial class TimelineItemViewModel : ViewModelBase, Ghuboon.App.Services
                 var id = NotificationId;
                 var stamp = now;
                 notifTask = SwallowAsync(
-                    Task.Run(() => repo.SetReadStateAsync(id, unread: false, readAt: stamp, ct), ct),
+                    RunBlockingIo(() => repo.SetReadStateAsync(id, unread: false, readAt: stamp, ct), ct),
                     "Persisting local read state failed for " + NotificationId);
             }
 
@@ -645,7 +646,7 @@ public partial class TimelineItemViewModel : ViewModelBase, Ghuboon.App.Services
                 var nid = NotificationId;
                 var stamp = now;
                 eventTask = SwallowAsync(
-                    Task.Run(() => evRepo.MarkThreadAsReadAsync(aid, nid, stamp, ct), ct),
+                    RunBlockingIo(() => evRepo.MarkThreadAsReadAsync(aid, nid, stamp, ct), ct),
                     "Marking event-log siblings read failed for " + NotificationId);
             }
 
@@ -745,7 +746,7 @@ public partial class TimelineItemViewModel : ViewModelBase, Ghuboon.App.Services
             var bookmarks = _ctx.Bookmarks;
             var aid = AccountId;
             var nid = NotificationId;
-            await Task.Run(() => bookmarks.SetAsync(aid, nid, now, ct), ct).ConfigureAwait(false);
+            await RunBlockingIo(() => bookmarks.SetAsync(aid, nid, now, ct), ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -767,7 +768,7 @@ public partial class TimelineItemViewModel : ViewModelBase, Ghuboon.App.Services
             var bookmarks = _ctx.Bookmarks;
             var aid = AccountId;
             var nid = NotificationId;
-            await Task.Run(() => bookmarks.ClearAsync(aid, nid, ct), ct).ConfigureAwait(false);
+            await RunBlockingIo(() => bookmarks.ClearAsync(aid, nid, ct), ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -870,14 +871,43 @@ public partial class TimelineItemViewModel : ViewModelBase, Ghuboon.App.Services
     /// 12 may silently drop / defer those notifications, which the user
     /// perceived as the detail pane "hanging" while every other thread
     /// looked idle. Route every PropertyChanged through this helper.
-    ///
-    /// Unit tests construct the VM without booting Avalonia, so
-    /// <c>Avalonia.Application.Current</c> is null. Fall back to inline
-    /// execution in that case — production always has an Application
-    /// instance.
+    /// <para>
+    /// Routes through <see cref="TimelineItemContext.Threading"/> when the
+    /// composition root wired one in (production). When the context has
+    /// no scheduler (legacy test fixtures that construct the VM directly),
+    /// fall back to Avalonia's dispatcher, then to inline — same chain as
+    /// before, just hidden behind the abstraction.
+    /// </para>
     /// </summary>
-    private static void RunOnUi(Action setter)
+    /// <summary>
+    /// Run a blocking-style async DB call off the UI thread. Routes
+    /// through <see cref="TimelineItemContext.Threading"/> when wired,
+    /// otherwise falls back to <see cref="Task.Run(Func{Task},CancellationToken)"/>.
+    /// Microsoft.Data.Sqlite's "async" methods are internally synchronous,
+    /// so awaiting from the UI thread would block the dispatcher for the
+    /// full SQLite operation (including WAL busy_timeout retries up to 5s).
+    /// </summary>
+    private Task RunBlockingIo(Func<Task> work, CancellationToken ct)
     {
+        var io = _ctx.Threading?.BlockingIo;
+        return io is not null ? io.RunAsync(work, ct) : Task.Run(work, ct);
+    }
+
+    private Task<T> RunBlockingIo<T>(Func<Task<T>> work, CancellationToken ct)
+    {
+        var io = _ctx.Threading?.BlockingIo;
+        return io is not null ? io.RunAsync(work, ct) : Task.Run(work, ct);
+    }
+
+    private void RunOnUi(Action setter)
+    {
+        var ui = _ctx.Threading?.Ui;
+        if (ui is not null)
+        {
+            if (ui.CheckAccess()) setter();
+            else ui.Post(setter);
+            return;
+        }
         if (Avalonia.Application.Current is null)
         {
             setter();

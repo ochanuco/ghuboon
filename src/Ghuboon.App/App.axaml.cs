@@ -272,7 +272,8 @@ public partial class App : Application
                 OnMarkRead: null,
                 Log: _logger,
                 Bookmarks: bookmarks,
-                OnFlash: msg => mainVmRef?.ShowFlash(msg));
+                OnFlash: msg => mainVmRef?.ShowFlash(msg),
+                Threading: threading);
         }
 
         // 9. Timeline service backed by the event-log cache.
