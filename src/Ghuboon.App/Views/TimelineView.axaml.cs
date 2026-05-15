@@ -86,19 +86,15 @@ public partial class TimelineView : UserControl
     /// </summary>
     private void OnSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
-        if (e.AddedItems is null || e.AddedItems.Count == 0)
-        {
-            return;
-        }
-
-        if (e.AddedItems[0] is TimelineItemViewModel item && item.Unread)
-        {
-            // Async fire-and-forget; the command itself swallows recoverable errors.
-            if (item.MarkAsReadCommand.CanExecute(null))
-            {
-                item.MarkAsReadCommand.Execute(null);
-            }
-        }
+        // Read-on-focus is now triggered from TimelineViewModel.
+        // OnSelectedItemChanged via the same Background-priority Post
+        // that debounces DetailItem and body load. Firing MarkAsRead
+        // straight from this synchronous event handler blocked the
+        // UI thread on the optimistic Unread flip + RecomputeAggregates
+        // (counts all 200 rows) AND queued an HTTP MarkThreadRead per
+        // intermediate row when the user held A/S, so the selection
+        // visual lagged behind the keystrokes. Empty body kept for the
+        // signal — Avalonia still subscribes via the XAML wiring.
     }
 
     /// <summary>

@@ -153,6 +153,18 @@ public partial class TimelineViewModel : ViewModelBase
             if (cts.IsCancellationRequested) return;
             if (!ReferenceEquals(_renderDeferCts, cts)) return;
             DetailItem = rowSnapshot;
+            // Read-on-focus: only fire when the selection has actually
+            // settled (we're past the debounce window). Firing
+            // synchronously from the View's SelectionChanged event used
+            // to pin the UI on rapid A/S navigation — every transient
+            // row's MarkAsRead triggered the optimistic Unread flip,
+            // RecomputeAggregates (O(N) across 200 rows), and an HTTP
+            // MarkThreadRead per intermediate row. Now mark-read only
+            // runs on the row the user dwelt on.
+            if (rowSnapshot.Unread && rowSnapshot.MarkAsReadCommand.CanExecute(null))
+            {
+                rowSnapshot.MarkAsReadCommand.Execute(null);
+            }
             // Fire the body load AFTER the DetailItem rebind so the
             // detail pane shows its header (title etc.) before we
             // wait on the network. Pass the same cts.Token so a
