@@ -617,23 +617,39 @@ public partial class TimelineItemViewModel : ViewModelBase
             // rebuild had stripped subject_api_url / latest_comment_url /
             // raw_json to nulls and broken the body fetch + Kind
             // classification on the next render.
+            // CRITICAL: Microsoft.Data.Sqlite's "async" methods are
+            // internally synchronous (documented limitation). Awaiting
+            // a DB write from the UI thread does NOT yield — the UI
+            // thread blocks for the duration of the SQLite operation,
+            // including any WAL busy_timeout retry (up to 5 s per
+            // write). The watchdog caught this as 9.3 s of UI-thread
+            // block right after a MarkAsRead. Wrap each DB call in
+            // Task.Run so it actually moves to the thread pool, then
+            // the WhenAll yields the UI thread genuinely.
             Task notifTask = Task.CompletedTask;
             if (_ctx.Repository is not null && !string.IsNullOrEmpty(NotificationId))
             {
+                var repo = _ctx.Repository;
+                var id = NotificationId;
+                var stamp = now;
                 notifTask = SwallowAsync(
-                    _ctx.Repository.SetReadStateAsync(NotificationId, unread: false, readAt: now, ct),
+                    Task.Run(() => repo.SetReadStateAsync(id, unread: false, readAt: stamp, ct), ct),
                     "Persisting local read state failed for " + NotificationId);
             }
 
             Task eventTask = Task.CompletedTask;
             if (_ctx.EventRepository is not null && !string.IsNullOrEmpty(NotificationId) && !string.IsNullOrEmpty(AccountId))
             {
+                var evRepo = _ctx.EventRepository;
+                var aid = AccountId;
+                var nid = NotificationId;
+                var stamp = now;
                 eventTask = SwallowAsync(
-                    _ctx.EventRepository.MarkThreadAsReadAsync(AccountId, NotificationId, now, ct),
+                    Task.Run(() => evRepo.MarkThreadAsReadAsync(aid, nid, stamp, ct), ct),
                     "Marking event-log siblings read failed for " + NotificationId);
             }
 
-            await Task.WhenAll(notifTask, eventTask).ConfigureAwait(true);
+            await Task.WhenAll(notifTask, eventTask).ConfigureAwait(false);
         }
         finally
         {
@@ -722,8 +738,14 @@ public partial class TimelineItemViewModel : ViewModelBase
         Flash("Bookmarked");
         try
         {
+            // Microsoft.Data.Sqlite's "async" is internally synchronous,
+            // so awaiting from the UI thread would block. Force the
+            // write onto the thread pool.
             var now = _ctx.Clock?.UtcNow ?? DateTimeOffset.UtcNow;
-            await _ctx.Bookmarks.SetAsync(AccountId, NotificationId, now, ct).ConfigureAwait(true);
+            var bookmarks = _ctx.Bookmarks;
+            var aid = AccountId;
+            var nid = NotificationId;
+            await Task.Run(() => bookmarks.SetAsync(aid, nid, now, ct), ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -742,7 +764,10 @@ public partial class TimelineItemViewModel : ViewModelBase
         Flash("Bookmark removed");
         try
         {
-            await _ctx.Bookmarks.ClearAsync(AccountId, NotificationId, ct).ConfigureAwait(true);
+            var bookmarks = _ctx.Bookmarks;
+            var aid = AccountId;
+            var nid = NotificationId;
+            await Task.Run(() => bookmarks.ClearAsync(aid, nid, ct), ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
