@@ -669,62 +669,7 @@ public partial class TimelineViewModel : ViewModelBase
 
     private void ReplaceItems(IReadOnlyList<TimelineItemViewModel> rearranged, string? previouslySelectedId)
     {
-        // Diff-apply against the existing ObservableCollection instead of
-        // Clear() + N × Add(). The clear-then-add pattern fired N+1
-        // NotifyCollectionChanged events for a 200-row reload, and the
-        // ListBox processed each event separately — visible as a TL
-        // flicker / tear on every sync tick. With a diff:
-        //   * Most sync ticks change 0–3 rows, so we emit 0–3 events.
-        //   * Tab / filter switches recycle existing VM refs (kept by
-        //     stable Id in _allItems), so order rearranges produce
-        //     Move events rather than full rebuilds.
-        var targetSet = new HashSet<TimelineItemViewModel>(rearranged, ReferenceEqualityComparer.Instance);
-
-        // 1. Remove rows that are no longer in the target.
-        for (var i = Items.Count - 1; i >= 0; i--)
-        {
-            if (!targetSet.Contains(Items[i]))
-            {
-                Items.RemoveAt(i);
-            }
-        }
-
-        // 2. Walk the target order and reconcile in place. At each index:
-        //    a) if the existing item matches, advance;
-        //    b) if the target already exists later, Move it forward;
-        //    c) otherwise Insert it.
-        for (var i = 0; i < rearranged.Count; i++)
-        {
-            var target = rearranged[i];
-            if (i >= Items.Count)
-            {
-                Items.Add(target);
-                continue;
-            }
-            if (ReferenceEquals(Items[i], target))
-            {
-                continue;
-            }
-            // Scan forward in Items for the target's current position.
-            var existingIdx = -1;
-            for (var j = i + 1; j < Items.Count; j++)
-            {
-                if (ReferenceEquals(Items[j], target))
-                {
-                    existingIdx = j;
-                    break;
-                }
-            }
-            if (existingIdx >= 0)
-            {
-                Items.Move(existingIdx, i);
-            }
-            else
-            {
-                Items.Insert(i, target);
-            }
-        }
-
+        ObservableCollectionReconciler.Apply(Items, rearranged);
         RecomputeAggregates();
 
         // Re-select: prefer the row the user was on; otherwise pick the
