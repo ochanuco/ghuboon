@@ -115,6 +115,16 @@ public partial class App : Application
 
     private MainWindowViewModel BuildMainViewModelWithRealDependencies()
     {
+        // 0. Threading schedulers. Bundled and passed through to
+        // ViewModels so call sites can route property writes via
+        // _threading.Ui (Avalonia dispatcher) and blocking I/O via
+        // _threading.BlockingIo (thread pool). This replaces the
+        // ad-hoc RunOnUi / Task.Run / Dispatcher.UIThread.Post
+        // sprinkled across the VMs. Wired now without changing call
+        // sites; next step is to migrate the existing call sites
+        // off the local helpers.
+        var threading = Ghuboon.App.Threading.ThreadingScheduler.ForProduction();
+
         // 1. Credential store (Keychain on macOS).
         var credentialStore = CredentialStoreFactory.Create();
 
@@ -302,6 +312,7 @@ public partial class App : Application
             RepositoriesSource = timelineService,
             UiDispatcher = action => Dispatcher.UIThread.Post(action),
             AppSettingsStore = settingsRepo,
+            Threading = threading,
         };
         mainVmRef = vm;
 
