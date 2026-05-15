@@ -148,32 +148,52 @@ public partial class TimelineViewModel : ViewModelBase
             // doesn't pay this cost on every transient row. Touch
             // only the rows whose IsRelatedToFocus would actually
             // change relative to the previous related set.
-            var newThreadId = rowSnapshot.NotificationId;
-            if (!string.Equals(_prevRelatedThreadId, newThreadId, StringComparison.Ordinal))
+            //
+            // Re-entrance guard: setting IsRelatedToFocus changes
+            // RowBackgroundColor → ListBoxItem invalidates → in some
+            // Avalonia configurations the ListBox flips its own
+            // SelectedItem mid-loop and re-fires OnSelectedItemChanged,
+            // which schedules another Background post here and so on
+            // — a dispatcher storm that froze the UI on Space → Space
+            // navigation (jump to oldest unread, then jump to latest).
+            // The synchronous handler's _repaintingTints guard already
+            // protects the IsSelectedRow flips; mirror it here so the
+            // deferred related-tint loop is similarly protected.
+            if (_repaintingTints) return;
+            _repaintingTints = true;
+            try
             {
-                if (!string.IsNullOrEmpty(_prevRelatedThreadId))
+                var newThreadId = rowSnapshot.NotificationId;
+                if (!string.Equals(_prevRelatedThreadId, newThreadId, StringComparison.Ordinal))
                 {
-                    foreach (var item in _allItems)
+                    if (!string.IsNullOrEmpty(_prevRelatedThreadId))
                     {
-                        if (item.IsRelatedToFocus
-                            && string.Equals(item.NotificationId, _prevRelatedThreadId, StringComparison.Ordinal))
+                        foreach (var item in _allItems)
                         {
-                            item.IsRelatedToFocus = false;
+                            if (item.IsRelatedToFocus
+                                && string.Equals(item.NotificationId, _prevRelatedThreadId, StringComparison.Ordinal))
+                            {
+                                item.IsRelatedToFocus = false;
+                            }
                         }
                     }
-                }
-                if (!string.IsNullOrEmpty(newThreadId))
-                {
-                    foreach (var item in _allItems)
+                    if (!string.IsNullOrEmpty(newThreadId))
                     {
-                        if (!ReferenceEquals(item, rowSnapshot)
-                            && string.Equals(item.NotificationId, newThreadId, StringComparison.Ordinal))
+                        foreach (var item in _allItems)
                         {
-                            item.IsRelatedToFocus = true;
+                            if (!ReferenceEquals(item, rowSnapshot)
+                                && string.Equals(item.NotificationId, newThreadId, StringComparison.Ordinal))
+                            {
+                                item.IsRelatedToFocus = true;
+                            }
                         }
                     }
+                    _prevRelatedThreadId = newThreadId;
                 }
-                _prevRelatedThreadId = newThreadId;
+            }
+            finally
+            {
+                _repaintingTints = false;
             }
 
             DetailItem = rowSnapshot;
