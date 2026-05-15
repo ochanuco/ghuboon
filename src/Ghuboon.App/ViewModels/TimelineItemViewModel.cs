@@ -737,8 +737,15 @@ public partial class TimelineItemViewModel : ViewModelBase
         try
         {
             await EnsureBodyLoadedCoreAsync(lct).ConfigureAwait(true);
-            _ctx.Log?.Information("body.load.done id={NotificationId} totalMs={Ms} bodyLen={Len}",
-                NotificationId, totalSw.ElapsedMilliseconds, _body?.Length ?? 0);
+            // Suppress body.load.done when the linked CTS fired — the
+            // inner catch swallows OCE on cancellation and returns
+            // normally, which would otherwise log "done" for what was
+            // actually an aborted load and skew the diagnostic numbers.
+            if (!lct.IsCancellationRequested)
+            {
+                _ctx.Log?.Information("body.load.done id={NotificationId} totalMs={Ms} bodyLen={Len}",
+                    NotificationId, totalSw.ElapsedMilliseconds, _body?.Length ?? 0);
+            }
         }
         catch (OperationCanceledException)
         {
