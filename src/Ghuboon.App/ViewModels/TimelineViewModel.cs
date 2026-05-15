@@ -110,9 +110,15 @@ public partial class TimelineViewModel : ViewModelBase
 
         if (value is null) return;
         DetailItem = value;
-        // Lazy-load the PR/Issue body for the detail pane. Fire-and-forget;
-        // EnsureBodyLoadedAsync swallows non-fatal errors and is idempotent.
-        _ = value.EnsureBodyLoadedAsync();
+        // Lazy-load the PR/Issue body for the detail pane. Fire-and-forget
+        // ON THE THREAD POOL so a slow GitHub fetch (sleep/wake stale
+        // connection, slow PAT keychain prompt, etc.) can't pin the UI
+        // thread. Without Task.Run the synchronous prelude of the async
+        // method runs on the caller (UI) until the first true await, and
+        // we observed UI hangs after macOS sleep where the first DB read
+        // alone took several seconds. EnsureBodyLoadedAsync is idempotent
+        // (guarded by _bodyAttempted) and swallows non-fatal errors.
+        _ = Task.Run(() => value.EnsureBodyLoadedAsync());
     }
 
     public TimelineViewModel()
