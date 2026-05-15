@@ -465,16 +465,47 @@ public partial class TimelineViewModel : ViewModelBase
                     // the user can re-bookmark.
                 }
             }
-            if (bookmarkedIds is not null)
+            // No-op fast path: if the sync brought back the exact same
+            // VM set in the same order AND the bookmark hydration would
+            // not flip any IsBookmarked, skip the UI batch entirely.
+            // Most poll cycles (60 s on a quiet account) re-fetch the
+            // same set, and the ApplyCurrentFilter → ReplaceItems →
+            // ObservableCollection diff → ListBox layout pass was
+            // visible as a "プチフリ" each minute.
+            var noChanges = freshItems.Count == 0
+                && newAll.Count == _allItems.Count;
+            if (noChanges)
+            {
+                for (var i = 0; i < newAll.Count; i++)
+                {
+                    if (!ReferenceEquals(newAll[i], _allItems[i]))
+                    {
+                        noChanges = false;
+                        break;
+                    }
+                }
+            }
+            if (noChanges && bookmarkedIds is not null)
             {
                 foreach (var item in newAll)
                 {
-                    var shouldBeBookmarked = bookmarkedIds.Contains(item.NotificationId);
-                    if (item.IsBookmarked != shouldBeBookmarked)
+                    if (item.IsBookmarked != bookmarkedIds.Contains(item.NotificationId))
                     {
-                        item.IsBookmarked = shouldBeBookmarked;
+                        noChanges = false;
+                        break;
                     }
                 }
+            }
+            if (noChanges)
+            {
+                // Still kick the ActorLogin backfill: the prior cts was
+                // cancelled at method entry, so without restarting it
+                // here, rows with missing actor on a quiet account
+                // never resolve on no-op ticks (they'd only catch up
+                // when an actual data change finally fires the UI
+                // batch). CodeRabbit feedback on PR #72.
+                _ = Task.Run(() => BackfillActorLoginsAsync(newAll.ToArray(), cts.Token), cts.Token);
+                return;
             }
 
             // Marshal back to UI for the bits that touch bound collections
@@ -482,6 +513,13 @@ public partial class TimelineViewModel : ViewModelBase
             // tests (no Avalonia Application bootstrapped), the
             // dispatcher InvokeAsync deadlocks the test runner — fall
             // back to inline execution on the current thread there.
+            //
+            // Bookmark hydration moved inside the UI batch so the
+            // IsBookmarked setter (which fires OnItemPropertyChanged
+            // → InvalidateTabCache → maybe ApplyFilter) doesn't race
+            // the binding system from off-UI. Fresh items have no
+            // listeners yet, reused items do — handling both inside
+            // the same UI batch keeps the threading model simple.
             Action uiBatch = () =>
             {
                 if (cts.IsCancellationRequested) return;
@@ -506,6 +544,19 @@ public partial class TimelineViewModel : ViewModelBase
 
                 _allItems.Clear();
                 _allItems.AddRange(newAll);
+
+                if (bookmarkedIds is not null)
+                {
+                    foreach (var item in newAll)
+                    {
+                        var shouldBeBookmarked = bookmarkedIds.Contains(item.NotificationId);
+                        if (item.IsBookmarked != shouldBeBookmarked)
+                        {
+                            item.IsBookmarked = shouldBeBookmarked;
+                        }
+                    }
+                }
+
                 InvalidateTabCache();
 
                 ApplyCurrentFilter();
