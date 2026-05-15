@@ -155,8 +155,13 @@ public partial class TimelineViewModel : ViewModelBase
             DetailItem = rowSnapshot;
             // Fire the body load AFTER the DetailItem rebind so the
             // detail pane shows its header (title etc.) before we
-            // wait on the network.
-            _ = Task.Run(() => rowSnapshot.EnsureBodyLoadedAsync());
+            // wait on the network. Pass the same cts.Token so a
+            // selection that moves on cancels the in-flight body
+            // fetch — without that, the previous row's body fetch
+            // kept running and could fight for the HttpClient pool /
+            // SQLCipher connection while the user was already
+            // navigating elsewhere.
+            _ = Task.Run(() => rowSnapshot.EnsureBodyLoadedAsync(cts.Token));
         }, Avalonia.Threading.DispatcherPriority.Background);
 
         // Markdown render gate stays on its own ~200 ms timer rooted
