@@ -75,24 +75,19 @@ public partial class TimelineViewModel : ViewModelBase
 
     private bool _repaintingTints;
     private CancellationTokenSource? _renderDeferCts;
+    // Track the previous selected / related-thread state so we can
+    // touch only the rows whose IsSelectedRow / IsRelatedToFocus
+    // values actually change, instead of scanning all _allItems on
+    // every keystroke.
+    private TimelineItemViewModel? _prevSelectedRow;
+    private string? _prevRelatedThreadId;
 
     partial void OnSelectedItemChanged(TimelineItemViewModel? value)
     {
         // Diagnostic: end-to-end timing of the synchronous part of the
-        // handler. Anything we do here blocks the UI; if the
-        // user-reported "Detail hang" turns out to be in the tint
-        // repaint or the DetailItem-bound rebind, this log will show
-        // it. Written via System.Diagnostics.Debug because
-        // TimelineViewModel doesn't carry a Serilog reference; the
-        // attached debugger / `log stream` window will capture it.
+        // handler. Anything we do here blocks the UI thread.
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        // Repaint per-row tints: selected row gets blue, same-thread
-        // siblings get soft green, every other row drops both flags.
-        // Operate on the master cache so rows that are filtered out of
-        // the current Items still get their flags updated for when they
-        // re-enter the filtered view.
-        //
         // Re-entrance guard: setting IsSelectedRow / IsRelatedToFocus
         // changes RowBackgroundColor → ListBoxItem invalidates → in some
         // Avalonia configurations the ListBox flips its own SelectedItem
@@ -102,15 +97,15 @@ public partial class TimelineViewModel : ViewModelBase
         _repaintingTints = true;
         try
         {
-            var threadId = value?.NotificationId;
-            var hasFocus = !string.IsNullOrEmpty(threadId);
-            foreach (var item in _allItems)
+            // SELECTED tint: only flip the row whose value actually
+            // changes. Touching all 200 _allItems per keystroke was
+            // the leftover synchronous cost the user reported as
+            // residual "stutter" on TL navigation.
+            if (!ReferenceEquals(_prevSelectedRow, value))
             {
-                var isSelected = ReferenceEquals(item, value);
-                item.IsSelectedRow = isSelected;
-                item.IsRelatedToFocus = hasFocus
-                    && !isSelected
-                    && string.Equals(item.NotificationId, threadId, StringComparison.Ordinal);
+                if (_prevSelectedRow is not null) _prevSelectedRow.IsSelectedRow = false;
+                if (value is not null) value.IsSelectedRow = true;
+                _prevSelectedRow = value;
             }
         }
         finally
@@ -121,23 +116,18 @@ public partial class TimelineViewModel : ViewModelBase
 
         if (value is null) return;
         var totalMs = sw.ElapsedMilliseconds;
-        // Surface to the per-item Log so we capture timing in the
-        // production log file. Captured before the deferred work
-        // schedules so it reflects the synchronous-handler cost only.
         value.LogSelectionTiming(totalMs, tintMs);
 
-        // Push DetailItem + render-gate + body-load triggers off the
-        // synchronous keyboard-event handler. We Post at Background
-        // priority so Avalonia's UI thread drains pending Input events
-        // (further A/S keystrokes) FIRST and only catches up on the
-        // DetailView rebind once the user pauses. Without this,
-        // every keystroke synchronously rebound every DetailView
-        // binding (title / kind / actor / repo / etc.) and the input
-        // queue felt sluggish even with the 200 ms markdown defer.
+        // Push DetailItem + related-tint + render-gate + body-load
+        // triggers off the synchronous keyboard-event handler. We Post
+        // at Background priority so Avalonia's UI thread drains pending
+        // Input events (further A/S keystrokes) FIRST and only catches
+        // up on the DetailView rebind once the user pauses.
         //
         // Debounce: each new selection cancels the prior Background
         // work item via _renderDeferCts. Holding A/S therefore only
-        // commits the FINAL row's DetailItem to the pane, not every
+        // commits the FINAL row's DetailItem (and related-thread
+        // tints, mark-read, body load) to the pane, not every
         // intermediate one.
         var prev = _renderDeferCts;
         _renderDeferCts = null;
@@ -152,6 +142,40 @@ public partial class TimelineViewModel : ViewModelBase
         {
             if (cts.IsCancellationRequested) return;
             if (!ReferenceEquals(_renderDeferCts, cts)) return;
+
+            // Related-thread tints (soft green for same-thread
+            // siblings). Defer alongside DetailItem so rapid A/S
+            // doesn't pay this cost on every transient row. Touch
+            // only the rows whose IsRelatedToFocus would actually
+            // change relative to the previous related set.
+            var newThreadId = rowSnapshot.NotificationId;
+            if (!string.Equals(_prevRelatedThreadId, newThreadId, StringComparison.Ordinal))
+            {
+                if (!string.IsNullOrEmpty(_prevRelatedThreadId))
+                {
+                    foreach (var item in _allItems)
+                    {
+                        if (item.IsRelatedToFocus
+                            && string.Equals(item.NotificationId, _prevRelatedThreadId, StringComparison.Ordinal))
+                        {
+                            item.IsRelatedToFocus = false;
+                        }
+                    }
+                }
+                if (!string.IsNullOrEmpty(newThreadId))
+                {
+                    foreach (var item in _allItems)
+                    {
+                        if (!ReferenceEquals(item, rowSnapshot)
+                            && string.Equals(item.NotificationId, newThreadId, StringComparison.Ordinal))
+                        {
+                            item.IsRelatedToFocus = true;
+                        }
+                    }
+                }
+                _prevRelatedThreadId = newThreadId;
+            }
+
             DetailItem = rowSnapshot;
             // Read-on-focus: only fire when the selection has actually
             // settled (we're past the debounce window). Firing
