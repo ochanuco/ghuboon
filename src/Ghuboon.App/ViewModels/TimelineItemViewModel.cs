@@ -101,11 +101,53 @@ public partial class TimelineItemViewModel : ViewModelBase
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasNoBodyAfterLoad))]
-    [NotifyPropertyChangedFor(nameof(BodyBlocks))]
     private string? _body;
 
-    public IReadOnlyList<BodyBlock> BodyBlocks =>
-        SplitIntoBlocks(Body);
+    // BodyBlocks used to be a getter that re-ran SplitIntoBlocks on every
+    // call. Worse, ItemsControl read it once per DataContext change AND
+    // every body arrival re-parsed on the UI thread, synchronously
+    // feeding Markdown.Avalonia's heavy rendering pass.
+    //
+    // Caching strategy:
+    //   * When Body is set via the setter (typical for the
+    //     Task.Run-backed lazy load path), OnBodyChanged parses
+    //     SYNCHRONOUSLY on the caller's thread — off-UI for lazy loads
+    //     — and stores the result, so the UI thread only sees the
+    //     finished list when the binding marshals through.
+    //   * When the constructor hydrates _body directly (Migration v8
+    //     cached body), we DON'T pre-parse 200 rows on the TL reload's
+    //     UI thread. We mark the cache dirty; the getter parses on first
+    //     access for that specific row only. That trades a 200-row
+    //     hydration hang for a ~1 ms parse on the first focus of each
+    //     cached row.
+    private IReadOnlyList<BodyBlock> _bodyBlocks = Array.Empty<BodyBlock>();
+    private bool _bodyBlocksDirty;
+    public IReadOnlyList<BodyBlock> BodyBlocks
+    {
+        get
+        {
+            if (_bodyBlocksDirty)
+            {
+                _bodyBlocks = SplitIntoBlocks(_body);
+                _bodyBlocksDirty = false;
+            }
+            return _bodyBlocks;
+        }
+        private set
+        {
+            if (!ReferenceEquals(_bodyBlocks, value))
+            {
+                _bodyBlocks = value;
+                _bodyBlocksDirty = false;
+                OnPropertyChanged(nameof(BodyBlocks));
+            }
+        }
+    }
+
+    partial void OnBodyChanged(string? value)
+    {
+        BodyBlocks = SplitIntoBlocks(value);
+    }
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasNoBodyAfterLoad))]
@@ -252,11 +294,16 @@ public partial class TimelineItemViewModel : ViewModelBase
         _actorLogin = source.ActorLogin;
         // Hydrate from the per-event body cache (Migration v8). When the
         // event already carries a fetched body we render from cache and
-        // skip the API call entirely on the next selection.
+        // skip the API call entirely on the next selection. We mark
+        // BodyBlocks as dirty (lazy-parse on first access) rather than
+        // pre-computing here — the constructor runs on the UI thread
+        // during TimelineViewModel.ReloadAsync's foreach, and pre-
+        // parsing 200 cached rows would stall the reload visibly.
         if (!string.IsNullOrEmpty(source.Body))
         {
             _body = source.Body;
             _bodyAuthorLogin = source.BodyAuthorLogin;
+            _bodyBlocksDirty = true;
             _bodyLoaded = true;
             _bodyAttempted = true;
         }
