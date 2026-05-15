@@ -112,6 +112,7 @@ public partial class TimelineItemViewModel : ViewModelBase
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasNoBodyAfterLoad))]
     [NotifyPropertyChangedFor(nameof(BodyIsLongFormPlainText))]
+    [NotifyPropertyChangedFor(nameof(BodyShouldShowMarkdown))]
     private string? _body;
 
     /// <summary>
