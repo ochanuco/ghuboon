@@ -82,6 +82,32 @@ public partial class App : Application
             _lastSyncRefreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
             _lastSyncRefreshTimer.Tick += (_, _) => _mainVm?.RefreshLastSyncText();
             _lastSyncRefreshTimer.Start();
+
+            // UI-thread watchdog: a 100 ms DispatcherTimer ticks at
+            // Normal priority. When the UI thread is blocked (whatever
+            // the cause — markdown render, GC pause, Cocoa interop,
+            // binding cascade), the next tick fires LATE by the block
+            // duration. Log gaps over 250 ms so we can see what
+            // correlates with the user-reported freezes.
+            var watchdogTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(100),
+            };
+            long lastTick = 0;
+            watchdogTimer.Tick += (_, _) =>
+            {
+                var now = Environment.TickCount64;
+                if (lastTick > 0)
+                {
+                    var gap = now - lastTick;
+                    if (gap > 250)
+                    {
+                        _logger?.Warning("ui.watchdog blocked {GapMs}ms (expected 100ms)", gap);
+                    }
+                }
+                lastTick = now;
+            };
+            watchdogTimer.Start();
         }
 
         base.OnFrameworkInitializationCompleted();
@@ -278,6 +304,11 @@ public partial class App : Application
             AppSettingsStore = settingsRepo,
         };
         mainVmRef = vm;
+
+        // Wire the diagnostic hook so TimelineViewModel can surface
+        // slow uiBatch / handler timings into the same file log used by
+        // sync / banner diagnostics.
+        Ghuboon.App.ViewModels.TimelineViewModel.DiagLog = msg => _logger?.Information("{Diag}", msg);
 
         return vm;
     }

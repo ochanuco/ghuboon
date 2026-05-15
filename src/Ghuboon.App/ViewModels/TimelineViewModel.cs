@@ -82,6 +82,14 @@ public partial class TimelineViewModel : ViewModelBase
     private TimelineItemViewModel? _prevSelectedRow;
     private string? _prevRelatedThreadId;
 
+    /// <summary>
+    /// Optional Serilog-style hook the App can set so the VM can surface
+    /// performance-debug data into the same file sink as the rest of the
+    /// app. Static so we don't have to thread an ILogger through every
+    /// constructor.
+    /// </summary>
+    public static Action<string>? DiagLog;
+
     partial void OnSelectedItemChanged(TimelineItemViewModel? value)
     {
         // Diagnostic: end-to-end timing of the synchronous part of the
@@ -524,11 +532,15 @@ public partial class TimelineViewModel : ViewModelBase
             {
                 if (cts.IsCancellationRequested) return;
 
+                var batchSw = System.Diagnostics.Stopwatch.StartNew();
+                long attachMs, detachMs, hydrateMs, applyMs;
+
                 // Wire up freshly constructed VMs.
                 foreach (var item in freshItems)
                 {
                     AttachItem(item);
                 }
+                attachMs = batchSw.ElapsedMilliseconds;
 
                 // Detach VMs that fell out of the master (retention prune /
                 // upstream deletion) so their PropertyChanged stops feeding
@@ -544,6 +556,7 @@ public partial class TimelineViewModel : ViewModelBase
 
                 _allItems.Clear();
                 _allItems.AddRange(newAll);
+                detachMs = batchSw.ElapsedMilliseconds - attachMs;
 
                 if (bookmarkedIds is not null)
                 {
@@ -556,10 +569,18 @@ public partial class TimelineViewModel : ViewModelBase
                         }
                     }
                 }
+                hydrateMs = batchSw.ElapsedMilliseconds - attachMs - detachMs;
 
                 InvalidateTabCache();
 
                 ApplyCurrentFilter();
+                applyMs = batchSw.ElapsedMilliseconds - attachMs - detachMs - hydrateMs;
+
+                if (batchSw.ElapsedMilliseconds > 100)
+                {
+                    DiagLog?.Invoke(
+                        $"reload.uiBatch slow: total={batchSw.ElapsedMilliseconds}ms attach={attachMs} detach={detachMs} hydrate={hydrateMs} apply={applyMs} items={newAll.Count} fresh={freshItems.Count}");
+                }
             };
             if (Avalonia.Application.Current is null)
             {
