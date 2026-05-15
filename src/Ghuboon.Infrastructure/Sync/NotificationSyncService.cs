@@ -315,291 +315,14 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
             {
                 ct.ThrowIfCancellationRequested();
 
-                var existing = await _notificationRepository
-                    .GetByIdAsync(notification.Id, ct)
-                    .ConfigureAwait(false);
-                var isNew = existing is null;
-
-                // TODO: get true raw_json from API client; design constraint between
-                // Phase 6 and Phase 5+7. Synthesize a minimal payload for the MVP so
-                // the raw_json column is non-empty and roughly representative.
-                var rawJson = SynthesizeRawJson(notification);
-
-                await _notificationRepository
-                    .UpsertAsync(notification, rawJson, now, ct)
+                var outcome = await ObserveOneNotificationAsync(
+                    notification, pat, state, accountId, now, seenRepoFullNames, ct)
                     .ConfigureAwait(false);
 
-                // Append an event row alongside the latest-state upsert so the
-                // timeline UI can render one row per observed update. The
-                // unique index on (account_id, notification_id, source_updated_at)
-                // dedups identical re-fetches: when a thread is already known
-                // at the same upstream updated_at, TryAppend returns false and
-                // the timeline stays at one row for that observation. A
-                // separate transition (e.g. PR Open -> Draft) bumps updated_at,
-                // so the next sync inserts a new row and the timeline grows.
-                //
-                // raw_json mirrors the synthesized minimal payload above; once
-                // the API client carries the original GitHub JSON forward
-                // (Phase 7 follow-up), this snapshot becomes the real raw
-                // payload without any further sync-side change.
-                // Resolve the actor (commenter for Comment kind, creator
-                // for PR/Issue/...) up-front so the User column is populated
-                // the moment the row appears — no lazy backfill, no per-row
-                // click required.
-                //
-                // Skip the lookup entirely when the cached notification row
-                // already has an actor for this thread: the new event row
-                // inherits the value via SetActorLoginAsync below, and re-
-                // fetching every sync wastes API budget on data we already
-                // have. We still resolve when:
-                //   * isNew (no cached row at all)
-                //   * existing.ActorLogin is null (never resolved)
-                //   * the notification's Kind has changed since the last
-                //     observation (the prior commenter no longer represents
-                //     the new event row's content).
-                //
-                // AND we additionally gate on "this observation will append
-                // a new event row" (updated_at moved forward). Without this
-                // gate the per-sync foreach blocked ~1.5 s per row on an
-                // actor API call even when no new event was going to be
-                // appended — turning a 35-thread sync into a 50-60 s pass
-                // and pushing the NewNotifications-driven banners that far
-                // behind the upstream activity. Diagnosed from the
-                // observed comment→PR banner gap (~70 s).
-                // Gate the EXPENSIVE actor lookup on "will this observation
-                // likely produce a new event row?" — i.e., upstream's
-                // UpdatedAt has moved forward (or we've never seen this
-                // notification). Without this gate the foreach blocked
-                // ~1.5 s per row on an API call even when the unique index
-                // was about to dedup the event anyway, turning a
-                // 35-thread sync into a 50–60 s pass and pushing the
-                // NewNotifications-driven banner stream that far behind
-                // the upstream activity. Diagnosed from a ~70 s
-                // comment→PR banner gap in production logs.
-                //
-                // TryAppendAsync still runs unconditionally below: the
-                // unique index is the source of truth for dedup, this
-                // gate is purely an actor-API short-circuit.
-                var existingKind = existing?.Subject.Kind;
-                var newKind = notification.Subject.Kind;
-                var willAppendNewEvent = existing is null
-                    || existing.UpdatedAt != notification.UpdatedAt;
-                var needsActorLookup = willAppendNewEvent
-                    && (existing is null
-                        || string.IsNullOrEmpty(existing.ActorLogin)
-                        || existingKind != newKind);
-                var actorLogin = needsActorLookup
-                    ? await ResolveActorLoginAsync(pat, notification, ct).ConfigureAwait(false)
-                    : existing?.ActorLogin;
+                if (outcome.IsNew) newCount++;
+                else updatedCount++;
 
-                var snapshot = new NotificationEvent(
-                    Id: 0,
-                    AccountId: notification.AccountId,
-                    NotificationId: notification.Id,
-                    ThreadId: notification.ThreadId,
-                    RepositoryFullName: notification.RepositoryFullName,
-                    Subject: notification.Subject,
-                    Reason: notification.Reason,
-                    SourceUpdatedAt: notification.UpdatedAt,
-                    ObservedAt: now,
-                    Unread: notification.Unread,
-                    LastReadAt: notification.LastReadAt,
-                    RawJson: rawJson,
-                    ActorLogin: actorLogin);
-                var eventAppended = false;
-                try
-                {
-                    eventAppended = await _eventRepository.TryAppendAsync(snapshot, ct).ConfigureAwait(false);
-                }
-                catch (Exception ex) when (ex is not OperationCanceledException)
-                {
-                    // Event-log append is non-fatal — losing one event row should
-                    // not bring the whole sync down because the latest state in
-                    // notifications is already persisted by the upsert above.
-                    _logger?.Warning(ex, "Append notification event failed for {NotificationId}", notification.Id);
-                }
-
-                // Persist the thread-level actor whenever we just resolved a
-                // fresh value AND the cached row still lacks one (or the
-                // resolved value differs from the cache). The notification
-                // row's actor_login feeds the timeline's User column for any
-                // sibling event rows that pre-date sync-time resolution, so
-                // backfilling here closes the gap for existing legacy data
-                // without waiting on a row click.
-                if (eventAppended
-                    && needsActorLookup
-                    && !string.IsNullOrEmpty(actorLogin)
-                    && !string.Equals(existing?.ActorLogin, actorLogin, StringComparison.Ordinal))
-                {
-                    try
-                    {
-                        await _notificationRepository
-                            .SetActorLoginAsync(notification.Id, actorLogin!, ct)
-                            .ConfigureAwait(false);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger?.Information(ex, "Seeding actor_login for {NotificationId} failed (non-fatal)", notification.Id);
-                    }
-                }
-
-                if (isNew)
-                {
-                    newCount++;
-                }
-                else
-                {
-                    updatedCount++;
-                }
-
-                // PR-anchor synthesis: GitHub's /notifications endpoint
-                // collapses a thread's history into a single "latest
-                // state" entry, so if we first observe a thread after a
-                // comment was already posted on it, we never see the
-                // pure PR-only state — the timeline shows a lone
-                // Comment row with no parent. To restore the parent's
-                // anchor row, fetch the subject (PR/Issue/Discussion)
-                // once on the first observation of a Comment-kind
-                // thread and synthesize a parent-kind event row dated
-                // at the subject's created_at.
-                //
-                // Synthetic events do NOT enter highPriorityNew —
-                // historical state shouldn't fire OS banners.
-                if (isNew
-                    && eventAppended
-                    && newKind == NotificationEventKind.Comment
-                    && !string.IsNullOrEmpty(notification.Subject.ApiUrl)
-                    && !string.IsNullOrEmpty(pat))
-                {
-                    try
-                    {
-                        var (_, parentAuthor, parentCreatedAt) = await _apiClient
-                            .GetSubjectMetaAsync(pat, notification.Subject.ApiUrl!, ct)
-                            .ConfigureAwait(false);
-
-                        if (parentCreatedAt is not null)
-                        {
-                            // Clear LatestCommentApiUrl so Kind classifies as
-                            // PullRequest/Issue/Discussion rather than Comment.
-                            var parentSubject = notification.Subject with { LatestCommentApiUrl = null };
-                            var parentSnapshot = new NotificationEvent(
-                                Id: 0,
-                                AccountId: notification.AccountId,
-                                NotificationId: notification.Id,
-                                ThreadId: notification.ThreadId,
-                                RepositoryFullName: notification.RepositoryFullName,
-                                Subject: parentSubject,
-                                Reason: notification.Reason,
-                                SourceUpdatedAt: parentCreatedAt.Value,
-                                ObservedAt: now,
-                                Unread: notification.Unread,
-                                LastReadAt: notification.LastReadAt,
-                                RawJson: rawJson,
-                                ActorLogin: string.IsNullOrEmpty(parentAuthor) ? actorLogin : parentAuthor);
-                            var parentAppended = await _eventRepository
-                                .TryAppendAsync(parentSnapshot, ct)
-                                .ConfigureAwait(false);
-                            _logger?.Information(
-                                "sync.synthesizeParent id={NotificationId} parentKind={Kind} createdAt={CreatedAt:O} appended={Appended}",
-                                notification.Id,
-                                parentSubject.Kind,
-                                parentCreatedAt.Value,
-                                parentAppended);
-                        }
-                    }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                    {
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger?.Information(ex, "PR-anchor synthesis failed for {NotificationId} (non-fatal)", notification.Id);
-                    }
-                }
-
-                // OS-banner trigger: any newly-observed event (new thread OR
-                // existing thread with a fresh source_updated_at) deserves a
-                // banner if the reason is high-priority. Old events that
-                // upstream surfaces for the first time but whose
-                // source_updated_at is older than our previous successful
-                // sync are NOT new from the user's perspective — we either
-                // banner'd them already in a past run, or the user has
-                // since moved on. Re-firing them is the "old notifications
-                // suddenly appear" UX bug. We still let them through on
-                // the very first sync (LastSuccessfulSyncAt is null and
-                // hasPriorSync gates the whole event upstream anyway).
-                // Gate: skip banners for re-surfaced OLD events whose
-                // upstream UpdatedAt predates our last successful sync
-                // (they're not new from the user's perspective). EXCEPT:
-                //   * first-ever sync (LastSuccessfulSyncAt is null) —
-                //     hasPriorSync gates the outer event anyway.
-                //   * isNew (we've never seen this notification before)
-                //     — without this, sub-second clock skew between
-                //     GitHub's whole-second UpdatedAt and our sub-second
-                //     LastSuccessfulSyncAt was suppressing legitimate
-                //     brand-new notifications. Observed in the field:
-                //     notif.UpdatedAt=14:03:59.000 vs lastSuccess=
-                //     14:03:59.483 silently dropped the banner.
-                var highPriority = HighPriorityNotificationReasons.Contains(notification.Reason);
-                var gatePassed = state.LastSuccessfulSyncAt is null
-                    || isNew
-                    || notification.UpdatedAt > state.LastSuccessfulSyncAt;
-                var bannerEligible = eventAppended && highPriority && gatePassed;
-                if (bannerEligible)
-                {
-                    highPriorityNew.Add(notification);
-                }
-
-                // Diagnostic trace: capture per-notification observation
-                // so the comment-arrives-before-PR delivery skew can be
-                // attributed to GitHub delivery lag (DeliveryLag big) vs.
-                // our 60s polling cadence (gap small at observation but
-                // SourceUpdatedAt much earlier than now) vs. the stale-
-                // event banner suppression gate misfiring (gatePassed=
-                // false on a row the user actually wants bannered).
-                // Debug level: one line per notification per sync gets
-                // noisy in production (35 lines / minute on a busy
-                // account). Use Debug so the sink can be silenced without
-                // changing this code; raise to Information only when
-                // actively investigating delivery skew.
-                _logger?.Debug(
-                    "sync.observe id={NotificationId} thread={ThreadId} reason={Reason} kind={Kind} " +
-                    "src.updatedAt={SourceUpdatedAt:O} observedAt={ObservedAt:O} deliveryLagSec={DeliveryLagSec:F1} " +
-                    "lastSuccessAt={LastSuccessfulSyncAt:O} isNew={IsNew} eventAppended={EventAppended} " +
-                    "highPriority={HighPriority} gatePassed={GatePassed} bannerEligible={BannerEligible}",
-                    notification.Id,
-                    notification.ThreadId,
-                    notification.Reason,
-                    notification.Subject.Kind,
-                    notification.UpdatedAt,
-                    now,
-                    (now - notification.UpdatedAt).TotalSeconds,
-                    state.LastSuccessfulSyncAt,
-                    isNew,
-                    eventAppended,
-                    highPriority,
-                    gatePassed,
-                    bannerEligible);
-
-                if (!string.IsNullOrEmpty(notification.RepositoryFullName) &&
-                    seenRepoFullNames.Add(notification.RepositoryFullName))
-                {
-                    try
-                    {
-                        await UpsertRepositoryAsync(accountId, notification.RepositoryFullName, ct).ConfigureAwait(false);
-                    }
-                    catch (ArgumentException ex)
-                    {
-                        // Malformed repository_full_name from upstream — log and skip
-                        // rather than failing the whole sync, so cached data is preserved
-                        // (issue #16). This is defensive against drift before issue #6's
-                        // invariants land.
-                        _logger?.Warning(
-                            ex,
-                            "Skipping repository upsert for notification {NotificationId} due to malformed full_name",
-                            notification.Id);
-                    }
-                }
+                if (outcome.BannerEligible) highPriorityNew.Add(notification);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -680,6 +403,290 @@ public sealed class NotificationSyncService : INotificationSyncService, IAsyncDi
         }
 
         return result2;
+    }
+
+    private readonly record struct ObservationOutcome(bool IsNew, bool BannerEligible);
+
+    /// <summary>
+    /// End-to-end persistence for one notification observed during a sync
+    /// pass: upsert the notifications row, append an event row, resolve
+    /// and backfill the actor login, synthesize a PR-anchor row on the
+    /// first Comment-kind observation, and surface the row for banner
+    /// dispatch when high-priority and not stale. Repository upsert is
+    /// folded in so the per-row work lives in one place.
+    /// <para>
+    /// Returns IsNew (drives newCount vs updatedCount in the caller) and
+    /// BannerEligible (drives <c>highPriorityNew</c> aggregation). Logging
+    /// and exception handling for individual sub-steps stays inside this
+    /// method so the outer loop can stay a thin orchestrator.
+    /// </para>
+    /// </summary>
+    private async Task<ObservationOutcome> ObserveOneNotificationAsync(
+        GitHubNotification notification,
+        string pat,
+        SyncState state,
+        string accountId,
+        DateTimeOffset now,
+        HashSet<string> seenRepoFullNames,
+        CancellationToken ct)
+    {
+        var existing = await _notificationRepository
+            .GetByIdAsync(notification.Id, ct)
+            .ConfigureAwait(false);
+        var isNew = existing is null;
+
+        // TODO: get true raw_json from API client; design constraint between
+        // Phase 6 and Phase 5+7. Synthesize a minimal payload for the MVP so
+        // the raw_json column is non-empty and roughly representative.
+        var rawJson = SynthesizeRawJson(notification);
+
+        await _notificationRepository
+            .UpsertAsync(notification, rawJson, now, ct)
+            .ConfigureAwait(false);
+
+        // Append an event row alongside the latest-state upsert so the
+        // timeline UI can render one row per observed update. The
+        // unique index on (account_id, notification_id, source_updated_at)
+        // dedups identical re-fetches: when a thread is already known
+        // at the same upstream updated_at, TryAppend returns false and
+        // the timeline stays at one row for that observation. A
+        // separate transition (e.g. PR Open -> Draft) bumps updated_at,
+        // so the next sync inserts a new row and the timeline grows.
+        //
+        // Resolve the actor (commenter for Comment kind, creator for
+        // PR/Issue/...) up-front so the User column is populated the
+        // moment the row appears — no lazy backfill, no per-row click
+        // required.
+        //
+        // Skip the lookup entirely when the cached notification row
+        // already has an actor for this thread: the new event row
+        // inherits the value via SetActorLoginAsync below, and re-
+        // fetching every sync wastes API budget on data we already have.
+        // We still resolve when:
+        //   * isNew (no cached row at all)
+        //   * existing.ActorLogin is null (never resolved)
+        //   * the notification's Kind has changed since the last
+        //     observation (the prior commenter no longer represents the
+        //     new event row's content).
+        //
+        // AND we additionally gate on "this observation will append a
+        // new event row" (updated_at moved forward). Without this gate
+        // the per-sync foreach blocked ~1.5 s per row on an actor API
+        // call even when no new event was going to be appended — turning
+        // a 35-thread sync into a 50–60 s pass and pushing the
+        // NewNotifications-driven banner stream that far behind the
+        // upstream activity. Diagnosed from the observed comment→PR
+        // banner gap (~70 s) in production logs.
+        //
+        // TryAppendAsync still runs unconditionally below: the unique
+        // index is the source of truth for dedup, this gate is purely
+        // an actor-API short-circuit.
+        var existingKind = existing?.Subject.Kind;
+        var newKind = notification.Subject.Kind;
+        var willAppendNewEvent = existing is null
+            || existing.UpdatedAt != notification.UpdatedAt;
+        var needsActorLookup = willAppendNewEvent
+            && (existing is null
+                || string.IsNullOrEmpty(existing.ActorLogin)
+                || existingKind != newKind);
+        var actorLogin = needsActorLookup
+            ? await ResolveActorLoginAsync(pat, notification, ct).ConfigureAwait(false)
+            : existing?.ActorLogin;
+
+        var snapshot = new NotificationEvent(
+            Id: 0,
+            AccountId: notification.AccountId,
+            NotificationId: notification.Id,
+            ThreadId: notification.ThreadId,
+            RepositoryFullName: notification.RepositoryFullName,
+            Subject: notification.Subject,
+            Reason: notification.Reason,
+            SourceUpdatedAt: notification.UpdatedAt,
+            ObservedAt: now,
+            Unread: notification.Unread,
+            LastReadAt: notification.LastReadAt,
+            RawJson: rawJson,
+            ActorLogin: actorLogin);
+        var eventAppended = false;
+        try
+        {
+            eventAppended = await _eventRepository.TryAppendAsync(snapshot, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Event-log append is non-fatal — losing one event row should
+            // not bring the whole sync down because the latest state in
+            // notifications is already persisted by the upsert above.
+            _logger?.Warning(ex, "Append notification event failed for {NotificationId}", notification.Id);
+        }
+
+        // Persist the thread-level actor whenever we just resolved a
+        // fresh value AND the cached row still lacks one (or the
+        // resolved value differs from the cache). The notification
+        // row's actor_login feeds the timeline's User column for any
+        // sibling event rows that pre-date sync-time resolution, so
+        // backfilling here closes the gap for existing legacy data
+        // without waiting on a row click.
+        if (eventAppended
+            && needsActorLookup
+            && !string.IsNullOrEmpty(actorLogin)
+            && !string.Equals(existing?.ActorLogin, actorLogin, StringComparison.Ordinal))
+        {
+            try
+            {
+                await _notificationRepository
+                    .SetActorLoginAsync(notification.Id, actorLogin!, ct)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger?.Information(ex, "Seeding actor_login for {NotificationId} failed (non-fatal)", notification.Id);
+            }
+        }
+
+        // PR-anchor synthesis: GitHub's /notifications endpoint collapses
+        // a thread's history into a single "latest state" entry, so if we
+        // first observe a thread after a comment was already posted on
+        // it, we never see the pure PR-only state — the timeline shows a
+        // lone Comment row with no parent. To restore the parent's
+        // anchor row, fetch the subject (PR/Issue/Discussion) once on the
+        // first observation of a Comment-kind thread and synthesize a
+        // parent-kind event row dated at the subject's created_at.
+        //
+        // Synthetic events do NOT enter highPriorityNew — historical
+        // state shouldn't fire OS banners.
+        if (isNew
+            && eventAppended
+            && newKind == NotificationEventKind.Comment
+            && !string.IsNullOrEmpty(notification.Subject.ApiUrl)
+            && !string.IsNullOrEmpty(pat))
+        {
+            try
+            {
+                var (_, parentAuthor, parentCreatedAt) = await _apiClient
+                    .GetSubjectMetaAsync(pat, notification.Subject.ApiUrl!, ct)
+                    .ConfigureAwait(false);
+
+                if (parentCreatedAt is not null)
+                {
+                    // Clear LatestCommentApiUrl so Kind classifies as
+                    // PullRequest/Issue/Discussion rather than Comment.
+                    var parentSubject = notification.Subject with { LatestCommentApiUrl = null };
+                    var parentSnapshot = new NotificationEvent(
+                        Id: 0,
+                        AccountId: notification.AccountId,
+                        NotificationId: notification.Id,
+                        ThreadId: notification.ThreadId,
+                        RepositoryFullName: notification.RepositoryFullName,
+                        Subject: parentSubject,
+                        Reason: notification.Reason,
+                        SourceUpdatedAt: parentCreatedAt.Value,
+                        ObservedAt: now,
+                        Unread: notification.Unread,
+                        LastReadAt: notification.LastReadAt,
+                        RawJson: rawJson,
+                        ActorLogin: string.IsNullOrEmpty(parentAuthor) ? actorLogin : parentAuthor);
+                    var parentAppended = await _eventRepository
+                        .TryAppendAsync(parentSnapshot, ct)
+                        .ConfigureAwait(false);
+                    _logger?.Information(
+                        "sync.synthesizeParent id={NotificationId} parentKind={Kind} createdAt={CreatedAt:O} appended={Appended}",
+                        notification.Id,
+                        parentSubject.Kind,
+                        parentCreatedAt.Value,
+                        parentAppended);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger?.Information(ex, "PR-anchor synthesis failed for {NotificationId} (non-fatal)", notification.Id);
+            }
+        }
+
+        // OS-banner trigger: any newly-observed event (new thread OR
+        // existing thread with a fresh source_updated_at) deserves a
+        // banner if the reason is high-priority. Old events that
+        // upstream surfaces for the first time but whose
+        // source_updated_at is older than our previous successful sync
+        // are NOT new from the user's perspective — we either banner'd
+        // them already in a past run, or the user has since moved on.
+        // Re-firing them is the "old notifications suddenly appear" UX
+        // bug. We still let them through on the very first sync
+        // (LastSuccessfulSyncAt is null and hasPriorSync gates the whole
+        // event upstream anyway).
+        //
+        // Gate: skip banners for re-surfaced OLD events whose upstream
+        // UpdatedAt predates our last successful sync (they're not new
+        // from the user's perspective). EXCEPT:
+        //   * first-ever sync (LastSuccessfulSyncAt is null) —
+        //     hasPriorSync gates the outer event anyway.
+        //   * isNew (we've never seen this notification before) —
+        //     without this, sub-second clock skew between GitHub's
+        //     whole-second UpdatedAt and our sub-second
+        //     LastSuccessfulSyncAt was suppressing legitimate brand-new
+        //     notifications. Observed: notif.UpdatedAt=14:03:59.000 vs
+        //     lastSuccess=14:03:59.483 silently dropped the banner.
+        var highPriority = HighPriorityNotificationReasons.Contains(notification.Reason);
+        var gatePassed = state.LastSuccessfulSyncAt is null
+            || isNew
+            || notification.UpdatedAt > state.LastSuccessfulSyncAt;
+        var bannerEligible = eventAppended && highPriority && gatePassed;
+
+        // Diagnostic trace: capture per-notification observation so the
+        // comment-arrives-before-PR delivery skew can be attributed to
+        // GitHub delivery lag (DeliveryLag big) vs. our 60s polling
+        // cadence (gap small at observation but SourceUpdatedAt much
+        // earlier than now) vs. the stale-event banner suppression gate
+        // misfiring (gatePassed=false on a row the user actually wants
+        // bannered). Debug level: one line per notification per sync
+        // gets noisy in production (35 lines / minute on a busy
+        // account). Use Debug so the sink can be silenced without
+        // changing this code; raise to Information only when actively
+        // investigating delivery skew.
+        _logger?.Debug(
+            "sync.observe id={NotificationId} thread={ThreadId} reason={Reason} kind={Kind} " +
+            "src.updatedAt={SourceUpdatedAt:O} observedAt={ObservedAt:O} deliveryLagSec={DeliveryLagSec:F1} " +
+            "lastSuccessAt={LastSuccessfulSyncAt:O} isNew={IsNew} eventAppended={EventAppended} " +
+            "highPriority={HighPriority} gatePassed={GatePassed} bannerEligible={BannerEligible}",
+            notification.Id,
+            notification.ThreadId,
+            notification.Reason,
+            notification.Subject.Kind,
+            notification.UpdatedAt,
+            now,
+            (now - notification.UpdatedAt).TotalSeconds,
+            state.LastSuccessfulSyncAt,
+            isNew,
+            eventAppended,
+            highPriority,
+            gatePassed,
+            bannerEligible);
+
+        if (!string.IsNullOrEmpty(notification.RepositoryFullName) &&
+            seenRepoFullNames.Add(notification.RepositoryFullName))
+        {
+            try
+            {
+                await UpsertRepositoryAsync(accountId, notification.RepositoryFullName, ct).ConfigureAwait(false);
+            }
+            catch (ArgumentException ex)
+            {
+                // Malformed repository_full_name from upstream — log and
+                // skip rather than failing the whole sync, so cached data
+                // is preserved (issue #16). This is defensive against
+                // drift before issue #6's invariants land.
+                _logger?.Warning(
+                    ex,
+                    "Skipping repository upsert for notification {NotificationId} due to malformed full_name",
+                    notification.Id);
+            }
+        }
+
+        return new ObservationOutcome(isNew, bannerEligible);
     }
 
     public void Start()
