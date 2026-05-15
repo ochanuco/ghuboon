@@ -662,86 +662,7 @@ public partial class TimelineViewModel : ViewModelBase
             return;
         }
 
-        // First pass: gather every matching item in _allItems order
-        // (oldest first, Tween-style).
-        var matched = new List<TimelineItemViewModel>(_allItems.Count);
-        foreach (var item in _allItems)
-        {
-            if (MatchesFilter(item, filter))
-            {
-                matched.Add(item);
-            }
-        }
-
-        // Dedup duplicate observations of the same logical event:
-        //   * Non-Comment kinds (PR / Issue / State / CI / ...) get
-        //     keyed by NotificationId — GitHub bumps updated_at on
-        //     push / CI / state without changing latest_comment_url,
-        //     so each bump appends another event row the EventKind
-        //     classifier reads as PR-mode and the user sees N
-        //     visually-identical rows. Keep the latest one per thread.
-        //   * Comment kind gets keyed by NotificationId +
-        //     LatestCommentApiUrl — the same comment can show up as
-        //     multiple event rows when its parent notification's
-        //     updated_at re-bumps for unrelated activity. Two events
-        //     pointing at the same /comments/{id} are the same logical
-        //     comment, so collapse them too. Distinct comment URLs on
-        //     the same thread (real new comments) survive.
-        // We iterate newest → oldest so the latest event in each
-        // group wins, then reverse for display.
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        var coalesced = new List<TimelineItemViewModel>(matched.Count);
-        for (var i = matched.Count - 1; i >= 0; i--)
-        {
-            var item = matched[i];
-            var key = item.EventKind == NotificationEventKind.Comment
-                ? $"C|{item.NotificationId}|{item.LatestCommentApiUrl ?? string.Empty}"
-                : $"T|{item.NotificationId}";
-
-            if (string.IsNullOrEmpty(item.NotificationId) || seen.Add(key))
-            {
-                coalesced.Add(item);
-            }
-        }
-        coalesced.Reverse(); // restore oldest-first display order
-
-        // Group by thread, put the PR / parent row first, comments after.
-        // Without this the timeline shows COMMENT(older) → PR(newer) when
-        // the very first observation of a thread happened to be a comment
-        // notification: the parent PR's "creation" row is later in the
-        // event log because its SourceUpdatedAt is the LATER observation
-        // time, not the actual PR-created time. Anchor each thread by its
-        // earliest event timestamp so cross-thread chronology is mostly
-        // preserved; inside a thread, PR-kind always wins.
-        var threadAnchor = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
-        foreach (var item in coalesced)
-        {
-            if (string.IsNullOrEmpty(item.NotificationId)) continue;
-            if (!threadAnchor.TryGetValue(item.NotificationId, out var existing)
-                || item.UpdatedAt < existing)
-            {
-                threadAnchor[item.NotificationId] = item.UpdatedAt;
-            }
-        }
-
-        static int KindPriority(NotificationEventKind k) => k switch
-        {
-            NotificationEventKind.PullRequest => 0,
-            NotificationEventKind.Issue => 0,
-            NotificationEventKind.Discussion => 0,
-            // Parent-entity kinds share priority 0; comments / others fall to 1.
-            _ => 1,
-        };
-
-        var rearranged = coalesced
-            .OrderBy(i => string.IsNullOrEmpty(i.NotificationId)
-                ? i.UpdatedAt
-                : (threadAnchor.TryGetValue(i.NotificationId, out var anchor) ? anchor : i.UpdatedAt))
-            .ThenBy(i => i.NotificationId, StringComparer.Ordinal)
-            .ThenBy(i => KindPriority(i.EventKind))
-            .ThenBy(i => i.UpdatedAt)
-            .ToList();
-
+        var rearranged = TimelineProjection.Build(_allItems, filter);
         _tabListCache[filter.Tab] = rearranged;
         ReplaceItems(rearranged, previouslySelectedId);
     }
@@ -819,61 +740,6 @@ public partial class TimelineViewModel : ViewModelBase
             SelectedItem = restore ?? Items[Items.Count - 1];
         }
     }
-
-    /// <summary>
-    /// Filter predicate: tab + multi-repo + free-text search. Mirrors the
-    /// rules in <see cref="DbBackedTimelineService.LoadAsync"/> so callers
-    /// can swap between server-side and client-side filtering without a
-    /// behavior change. The service version stays around for direct
-    /// integration tests; the VM-side version is what drives tab switches.
-    /// </summary>
-    private static bool MatchesFilter(TimelineItemViewModel item, TimelineFilter filter)
-    {
-        if (!DbBackedTimelineService.MatchesTab(item.Reason, filter.Tab))
-        {
-            return false;
-        }
-        if (filter.Tab == TimelineTab.MyPrs
-            && item.EventKind != NotificationEventKind.PullRequest)
-        {
-            return false;
-        }
-        if (filter.Tab == TimelineTab.Bookmarks && !item.IsBookmarked)
-        {
-            return false;
-        }
-        if (!filter.MatchesAllRepositories)
-        {
-            if (string.IsNullOrEmpty(item.RepositoryFullName)) return false;
-            var allowed = filter.RepositoryFullNames!;
-            var anyMatch = false;
-            foreach (var name in allowed)
-            {
-                if (string.Equals(name, item.RepositoryFullName, StringComparison.OrdinalIgnoreCase))
-                {
-                    anyMatch = true;
-                    break;
-                }
-            }
-            if (!anyMatch) return false;
-        }
-        if (!string.IsNullOrWhiteSpace(filter.SearchText))
-        {
-            var needle = filter.SearchText.Trim();
-            if (!Contains(item.RepositoryFullName, needle)
-                && !Contains(item.Title, needle)
-                && !Contains(item.Reason.ToString(), needle)
-                && !Contains(item.SubjectType, needle))
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static bool Contains(string? haystack, string needle) =>
-        !string.IsNullOrEmpty(haystack)
-        && haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
 
     private static async Task BackfillActorLoginsAsync(TimelineItemViewModel[] snapshot, CancellationToken ct)
     {
