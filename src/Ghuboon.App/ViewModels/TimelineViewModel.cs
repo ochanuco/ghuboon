@@ -383,17 +383,19 @@ public partial class TimelineViewModel : ViewModelBase
             // request so the VM holds every row the service can offer.
             // Filtering then happens in ApplyCurrentFilter() against this
             // cache without hitting the DB on each tab / repo change.
-            // ConfigureAwait(true) so the continuation runs back on the
-            // caller's SynchronizationContext (Avalonia's UI thread in
-            // production, none in unit tests). Items.Clear() / Items.Add()
-            // below mutate an ObservableCollection bound to the UI, which
-            // Avalonia only accepts on the UI thread. Production callers
-            // are already expected to invoke ReloadAsync from the UI
-            // thread (see comment on the foreach below); this guard
-            // protects against an off-thread resumption when the
-            // underlying service awaits something that completes on the
-            // thread pool.
-            var events = await _timelineService.LoadAsync(TimelineFilter.Default, cts.Token).ConfigureAwait(true);
+            //
+            // Run the DB load and VM construction OFF the UI thread —
+            // user reported a multi-second freeze on app launch where
+            // the window appeared but TL stayed empty with no input
+            // response. The culprit was the initial-load chain
+            // (ConfigureAwait(true)) doing 200 VM constructors and
+            // 200 IsBookmarked property writes synchronously on the UI
+            // dispatcher. We now build the new VM list + look up the
+            // bookmark set on the thread pool, then marshal back to UI
+            // only for the small cluster of operations that touch
+            // bound state (AttachItem subscription, _allItems mutation,
+            // ApplyCurrentFilter).
+            var events = await _timelineService.LoadAsync(TimelineFilter.Default, cts.Token).ConfigureAwait(false);
 
             // Reuse existing VMs by stable Id where possible — the Body /
             // BodyAuthorLogin / Unread state on a kept VM survives a Sync,
@@ -401,6 +403,7 @@ public partial class TimelineViewModel : ViewModelBase
             // don't snap back to "loading" until the next selection.
             var existingById = _allItems.ToDictionary(i => i.Id);
             var newAll = new List<TimelineItemViewModel>(events.Count);
+            var freshItems = new List<TimelineItemViewModel>();
             foreach (var ev in events)
             {
                 var id = ev.Id > 0 ? $"evt:{ev.Id}" : ev.NotificationId;
@@ -410,43 +413,30 @@ public partial class TimelineViewModel : ViewModelBase
                 }
                 else
                 {
+                    // Construct OFF-UI. No listeners attached yet, so the
+                    // ObservableProperty setters fire PropertyChanged into
+                    // a void — cheap. AttachItem is deferred to the UI
+                    // marshal below where it's safe to wire up the
+                    // listener chain.
                     var item = new TimelineItemViewModel(ev, _itemContextFactory());
-                    AttachItem(item);
                     newAll.Add(item);
+                    freshItems.Add(item);
                 }
             }
 
-            // Detach VMs that fell out of the master (retention prune /
-            // upstream deletion) so their PropertyChanged stops feeding
-            // RecomputeAggregates.
-            var newIds = new HashSet<string>(newAll.Select(i => i.Id), StringComparer.Ordinal);
-            foreach (var stale in _allItems)
-            {
-                if (!newIds.Contains(stale.Id))
-                {
-                    stale.PropertyChanged -= OnItemPropertyChanged;
-                }
-            }
-
-            _allItems.Clear();
-            _allItems.AddRange(newAll);
-            InvalidateTabCache();
-
-            // Hydrate bookmark flags from the local-state store. A single
-            // query covers every item; we then stamp each VM whose
-            // NotificationId is in the set. Survives across reloads
-            // because the source of truth is the DB.
+            // Bookmark hydration off-UI as well. Setting IsBookmarked on a
+            // not-yet-attached VM is free (PropertyChanged has no
+            // subscribers), so this avoids the 200 OnItemPropertyChanged →
+            // InvalidateTabCache calls we'd otherwise rack up on the UI
+            // thread.
+            IReadOnlySet<string>? bookmarkedIds = null;
             if (Bookmarks is not null && !string.IsNullOrEmpty(BookmarkAccountId))
             {
                 try
                 {
-                    var bookmarkedIds = await Bookmarks
+                    bookmarkedIds = await Bookmarks
                         .GetBookmarkedIdsAsync(BookmarkAccountId!, cts.Token)
-                        .ConfigureAwait(true);
-                    foreach (var item in _allItems)
-                    {
-                        item.IsBookmarked = bookmarkedIds.Contains(item.NotificationId);
-                    }
+                        .ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (cts.IsCancellationRequested) { throw; }
                 catch
@@ -455,8 +445,59 @@ public partial class TimelineViewModel : ViewModelBase
                     // the user can re-bookmark.
                 }
             }
+            if (bookmarkedIds is not null)
+            {
+                foreach (var item in newAll)
+                {
+                    var shouldBeBookmarked = bookmarkedIds.Contains(item.NotificationId);
+                    if (item.IsBookmarked != shouldBeBookmarked)
+                    {
+                        item.IsBookmarked = shouldBeBookmarked;
+                    }
+                }
+            }
 
-            ApplyCurrentFilter();
+            // Marshal back to UI for the bits that touch bound collections
+            // / fire PropertyChanged into now-live subscribers. In unit
+            // tests (no Avalonia Application bootstrapped), the
+            // dispatcher InvokeAsync deadlocks the test runner — fall
+            // back to inline execution on the current thread there.
+            Action uiBatch = () =>
+            {
+                if (cts.IsCancellationRequested) return;
+
+                // Wire up freshly constructed VMs.
+                foreach (var item in freshItems)
+                {
+                    AttachItem(item);
+                }
+
+                // Detach VMs that fell out of the master (retention prune /
+                // upstream deletion) so their PropertyChanged stops feeding
+                // RecomputeAggregates.
+                var newIds = new HashSet<string>(newAll.Select(i => i.Id), StringComparer.Ordinal);
+                foreach (var stale in _allItems)
+                {
+                    if (!newIds.Contains(stale.Id))
+                    {
+                        stale.PropertyChanged -= OnItemPropertyChanged;
+                    }
+                }
+
+                _allItems.Clear();
+                _allItems.AddRange(newAll);
+                InvalidateTabCache();
+
+                ApplyCurrentFilter();
+            };
+            if (Avalonia.Application.Current is null)
+            {
+                uiBatch();
+            }
+            else
+            {
+                await Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(uiBatch);
+            }
 
             // Backfill ActorLogin for rows that don't have one persisted yet.
             // Fires EnsureBodyLoadedAsync sequentially in the background so the
