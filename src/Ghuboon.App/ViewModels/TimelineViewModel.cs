@@ -171,7 +171,18 @@ public partial class TimelineViewModel : ViewModelBase
             catch (TaskCanceledException) { return; }
             if (cts.IsCancellationRequested) return;
             if (!ReferenceEquals(_renderDeferCts, cts)) return;
-            rowSnapshot.RenderingAllowed = true;
+            // Avalonia 12's threading model requires INotifyPropertyChanged
+            // notifications on UI-bound properties to be raised on the
+            // UI thread. Setting RenderingAllowed flips RenderableBlocks
+            // which is bound to the DetailView's ItemsControl, so the
+            // setter call has to marshal even though the Task.Delay
+            // itself runs off-UI.
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                if (cts.IsCancellationRequested) return;
+                if (!ReferenceEquals(_renderDeferCts, cts)) return;
+                rowSnapshot.RenderingAllowed = true;
+            });
         });
     }
 
