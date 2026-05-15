@@ -74,9 +74,19 @@ public partial class TimelineViewModel : ViewModelBase
     private TimelineItemViewModel? _detailItem;
 
     private bool _repaintingTints;
+    private CancellationTokenSource? _renderDeferCts;
 
     partial void OnSelectedItemChanged(TimelineItemViewModel? value)
     {
+        // Diagnostic: end-to-end timing of the synchronous part of the
+        // handler. Anything we do here blocks the UI; if the
+        // user-reported "Detail hang" turns out to be in the tint
+        // repaint or the DetailItem-bound rebind, this log will show
+        // it. Written via System.Diagnostics.Debug because
+        // TimelineViewModel doesn't carry a Serilog reference; the
+        // attached debugger / `log stream` window will capture it.
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
         // Repaint per-row tints: selected row gets blue, same-thread
         // siblings get soft green, every other row drops both flags.
         // Operate on the master cache so rows that are filtered out of
@@ -107,9 +117,44 @@ public partial class TimelineViewModel : ViewModelBase
         {
             _repaintingTints = false;
         }
+        var tintMs = sw.ElapsedMilliseconds;
 
         if (value is null) return;
         DetailItem = value;
+        var totalMs = sw.ElapsedMilliseconds;
+        // Surface to the per-item Log so we capture timing in the
+        // production log file (~/Library/Application Support/Ghuboon/
+        // logs/). Anything blocking the UI in OnSelectedItemChanged
+        // shows here.
+        value.LogSelectionTiming(totalMs, tintMs);
+
+        // Defer the heavy markdown render. RenderingAllowed gates the
+        // ItemsControl's data source (RenderableBlocks). We start it
+        // false on every selection, then flip true ~200 ms later — if
+        // the user moves on within that window the markdown render is
+        // skipped entirely for the intermediate row. The visible header
+        // (title / kind / actor) still updates instantly because those
+        // bindings don't go through RenderableBlocks.
+        var prev = _renderDeferCts;
+        _renderDeferCts = null;
+        prev?.Cancel();
+        prev?.Dispose();
+        value.RenderingAllowed = false;
+        var cts = new CancellationTokenSource();
+        _renderDeferCts = cts;
+        var rowSnapshot = value;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(200), cts.Token).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException) { return; }
+            if (cts.IsCancellationRequested) return;
+            if (!ReferenceEquals(_renderDeferCts, cts)) return;
+            rowSnapshot.RenderingAllowed = true;
+        });
+
         // Lazy-load the PR/Issue body for the detail pane. Fire-and-forget
         // ON THE THREAD POOL so a slow GitHub fetch (sleep/wake stale
         // connection, slow PAT keychain prompt, etc.) can't pin the UI

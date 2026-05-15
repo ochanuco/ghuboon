@@ -229,7 +229,7 @@
                                   HorizontalScrollBarVisibility="Disabled"
                                   VerticalScrollBarVisibility="Auto"
                                   IsVisible="{Binding Body, Converter={x:Static StringConverters.IsNotNullOrEmpty}, FallbackValue=False}">
-                        <ItemsControl ItemsSource="{Binding BodyBlocks}">
+                        <ItemsControl ItemsSource="{Binding RenderableBlocks}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate DataType="vm:BodyBlock">
                                     <Panel>

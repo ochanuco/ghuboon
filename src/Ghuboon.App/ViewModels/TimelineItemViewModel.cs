@@ -140,6 +140,7 @@ public partial class TimelineItemViewModel : ViewModelBase
                 _bodyBlocks = value;
                 _bodyBlocksDirty = false;
                 OnPropertyChanged(nameof(BodyBlocks));
+                OnPropertyChanged(nameof(RenderableBlocks));
             }
         }
     }
@@ -148,6 +149,38 @@ public partial class TimelineItemViewModel : ViewModelBase
     {
         BodyBlocks = SplitIntoBlocks(value);
     }
+
+    // Markdown rendering is heavy (third-party MarkdownScrollViewer
+    // parses + lays out on the UI thread when its Markdown property is
+    // set). Holding A/S through cached rows used to trigger that
+    // ~1 s pipeline per row, showing as a frozen UI plus "bouncing"
+    // selection highlight when queued keystrokes drained. We defer the
+    // ItemsControl binding via this flag: TimelineViewModel flips it
+    // back true ~200 ms after a selection settles, so transient
+    // intermediate rows never pay the markdown render cost.
+    private bool _renderingAllowed;
+    public bool RenderingAllowed
+    {
+        get => _renderingAllowed;
+        set
+        {
+            if (_renderingAllowed != value)
+            {
+                _renderingAllowed = value;
+                OnPropertyChanged(nameof(RenderingAllowed));
+                OnPropertyChanged(nameof(RenderableBlocks));
+            }
+        }
+    }
+
+    /// <summary>
+    /// What the detail-pane ItemsControl actually binds to. Returns
+    /// the parsed BodyBlocks once <see cref="RenderingAllowed"/> is
+    /// true; while the selection is settling, returns an empty list so
+    /// the markdown control sees no work.
+    /// </summary>
+    public IReadOnlyList<BodyBlock> RenderableBlocks =>
+        RenderingAllowed ? BodyBlocks : Array.Empty<BodyBlock>();
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasNoBodyAfterLoad))]
@@ -661,6 +694,21 @@ public partial class TimelineItemViewModel : ViewModelBase
     }
 
     /// <summary>
+    /// Diagnostic hook used by TimelineViewModel.OnSelectedItemChanged
+    /// to record how long the synchronous selection-change handler took.
+    /// Routed through the per-row Log so it lands in the same file sink
+    /// as the body-load timings, giving us a single place to look when
+    /// the user reports a UI hang on focus.
+    /// </summary>
+    public void LogSelectionTiming(long totalMs, long tintMs)
+    {
+        if (totalMs < 30 && tintMs < 30) return; // skip noise
+        _ctx.Log?.Information(
+            "select.handled id={NotificationId} totalMs={TotalMs} tintMs={TintMs} bodyCached={BodyCached}",
+            NotificationId, totalMs, tintMs, BodyLoaded);
+    }
+
+    /// <summary>
     /// Lazy-fetch the PR/Issue/Comment body from GitHub for the detail panel.
     /// Idempotent — guarded by <c>_bodyAttempted</c> so repeat selection of the
     /// same row doesn't re-hit the API. Failures are silent (Body stays null).
@@ -682,9 +730,15 @@ public partial class TimelineItemViewModel : ViewModelBase
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
         deadline.CancelAfter(TimeSpan.FromSeconds(10));
         var lct = deadline.Token;
+        // Diagnostic: time each body-load attempt end-to-end so we can
+        // attribute the user-reported "Detail loading hang on uncached
+        // focus" to a specific stage (DB read, PAT, HTTP, parse).
+        var totalSw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await EnsureBodyLoadedCoreAsync(lct).ConfigureAwait(true);
+            _ctx.Log?.Information("body.load.done id={NotificationId} totalMs={Ms} bodyLen={Len}",
+                NotificationId, totalSw.ElapsedMilliseconds, _body?.Length ?? 0);
         }
         catch (OperationCanceledException)
         {
