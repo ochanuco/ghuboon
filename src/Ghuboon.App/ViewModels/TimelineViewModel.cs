@@ -75,24 +75,19 @@ public partial class TimelineViewModel : ViewModelBase
 
     private bool _repaintingTints;
     private CancellationTokenSource? _renderDeferCts;
+    // Track the previous selected / related-thread state so we can
+    // touch only the rows whose IsSelectedRow / IsRelatedToFocus
+    // values actually change, instead of scanning all _allItems on
+    // every keystroke.
+    private TimelineItemViewModel? _prevSelectedRow;
+    private string? _prevRelatedThreadId;
 
     partial void OnSelectedItemChanged(TimelineItemViewModel? value)
     {
         // Diagnostic: end-to-end timing of the synchronous part of the
-        // handler. Anything we do here blocks the UI; if the
-        // user-reported "Detail hang" turns out to be in the tint
-        // repaint or the DetailItem-bound rebind, this log will show
-        // it. Written via System.Diagnostics.Debug because
-        // TimelineViewModel doesn't carry a Serilog reference; the
-        // attached debugger / `log stream` window will capture it.
+        // handler. Anything we do here blocks the UI thread.
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        // Repaint per-row tints: selected row gets blue, same-thread
-        // siblings get soft green, every other row drops both flags.
-        // Operate on the master cache so rows that are filtered out of
-        // the current Items still get their flags updated for when they
-        // re-enter the filtered view.
-        //
         // Re-entrance guard: setting IsSelectedRow / IsRelatedToFocus
         // changes RowBackgroundColor → ListBoxItem invalidates → in some
         // Avalonia configurations the ListBox flips its own SelectedItem
@@ -102,15 +97,15 @@ public partial class TimelineViewModel : ViewModelBase
         _repaintingTints = true;
         try
         {
-            var threadId = value?.NotificationId;
-            var hasFocus = !string.IsNullOrEmpty(threadId);
-            foreach (var item in _allItems)
+            // SELECTED tint: only flip the row whose value actually
+            // changes. Touching all 200 _allItems per keystroke was
+            // the leftover synchronous cost the user reported as
+            // residual "stutter" on TL navigation.
+            if (!ReferenceEquals(_prevSelectedRow, value))
             {
-                var isSelected = ReferenceEquals(item, value);
-                item.IsSelectedRow = isSelected;
-                item.IsRelatedToFocus = hasFocus
-                    && !isSelected
-                    && string.Equals(item.NotificationId, threadId, StringComparison.Ordinal);
+                if (_prevSelectedRow is not null) _prevSelectedRow.IsSelectedRow = false;
+                if (value is not null) value.IsSelectedRow = true;
+                _prevSelectedRow = value;
             }
         }
         finally
@@ -121,23 +116,18 @@ public partial class TimelineViewModel : ViewModelBase
 
         if (value is null) return;
         var totalMs = sw.ElapsedMilliseconds;
-        // Surface to the per-item Log so we capture timing in the
-        // production log file. Captured before the deferred work
-        // schedules so it reflects the synchronous-handler cost only.
         value.LogSelectionTiming(totalMs, tintMs);
 
-        // Push DetailItem + render-gate + body-load triggers off the
-        // synchronous keyboard-event handler. We Post at Background
-        // priority so Avalonia's UI thread drains pending Input events
-        // (further A/S keystrokes) FIRST and only catches up on the
-        // DetailView rebind once the user pauses. Without this,
-        // every keystroke synchronously rebound every DetailView
-        // binding (title / kind / actor / repo / etc.) and the input
-        // queue felt sluggish even with the 200 ms markdown defer.
+        // Push DetailItem + related-tint + render-gate + body-load
+        // triggers off the synchronous keyboard-event handler. We Post
+        // at Background priority so Avalonia's UI thread drains pending
+        // Input events (further A/S keystrokes) FIRST and only catches
+        // up on the DetailView rebind once the user pauses.
         //
         // Debounce: each new selection cancels the prior Background
         // work item via _renderDeferCts. Holding A/S therefore only
-        // commits the FINAL row's DetailItem to the pane, not every
+        // commits the FINAL row's DetailItem (and related-thread
+        // tints, mark-read, body load) to the pane, not every
         // intermediate one.
         var prev = _renderDeferCts;
         _renderDeferCts = null;
@@ -152,7 +142,53 @@ public partial class TimelineViewModel : ViewModelBase
         {
             if (cts.IsCancellationRequested) return;
             if (!ReferenceEquals(_renderDeferCts, cts)) return;
+
+            // Related-thread tints (soft green for same-thread
+            // siblings). Defer alongside DetailItem so rapid A/S
+            // doesn't pay this cost on every transient row. Touch
+            // only the rows whose IsRelatedToFocus would actually
+            // change relative to the previous related set.
+            var newThreadId = rowSnapshot.NotificationId;
+            if (!string.Equals(_prevRelatedThreadId, newThreadId, StringComparison.Ordinal))
+            {
+                if (!string.IsNullOrEmpty(_prevRelatedThreadId))
+                {
+                    foreach (var item in _allItems)
+                    {
+                        if (item.IsRelatedToFocus
+                            && string.Equals(item.NotificationId, _prevRelatedThreadId, StringComparison.Ordinal))
+                        {
+                            item.IsRelatedToFocus = false;
+                        }
+                    }
+                }
+                if (!string.IsNullOrEmpty(newThreadId))
+                {
+                    foreach (var item in _allItems)
+                    {
+                        if (!ReferenceEquals(item, rowSnapshot)
+                            && string.Equals(item.NotificationId, newThreadId, StringComparison.Ordinal))
+                        {
+                            item.IsRelatedToFocus = true;
+                        }
+                    }
+                }
+                _prevRelatedThreadId = newThreadId;
+            }
+
             DetailItem = rowSnapshot;
+            // Read-on-focus: only fire when the selection has actually
+            // settled (we're past the debounce window). Firing
+            // synchronously from the View's SelectionChanged event used
+            // to pin the UI on rapid A/S navigation — every transient
+            // row's MarkAsRead triggered the optimistic Unread flip,
+            // RecomputeAggregates (O(N) across 200 rows), and an HTTP
+            // MarkThreadRead per intermediate row. Now mark-read only
+            // runs on the row the user dwelt on.
+            if (rowSnapshot.Unread && rowSnapshot.MarkAsReadCommand.CanExecute(null))
+            {
+                rowSnapshot.MarkAsReadCommand.Execute(null);
+            }
             // Fire the body load AFTER the DetailItem rebind so the
             // detail pane shows its header (title etc.) before we
             // wait on the network. Pass the same cts.Token so a
@@ -347,17 +383,19 @@ public partial class TimelineViewModel : ViewModelBase
             // request so the VM holds every row the service can offer.
             // Filtering then happens in ApplyCurrentFilter() against this
             // cache without hitting the DB on each tab / repo change.
-            // ConfigureAwait(true) so the continuation runs back on the
-            // caller's SynchronizationContext (Avalonia's UI thread in
-            // production, none in unit tests). Items.Clear() / Items.Add()
-            // below mutate an ObservableCollection bound to the UI, which
-            // Avalonia only accepts on the UI thread. Production callers
-            // are already expected to invoke ReloadAsync from the UI
-            // thread (see comment on the foreach below); this guard
-            // protects against an off-thread resumption when the
-            // underlying service awaits something that completes on the
-            // thread pool.
-            var events = await _timelineService.LoadAsync(TimelineFilter.Default, cts.Token).ConfigureAwait(true);
+            //
+            // Run the DB load and VM construction OFF the UI thread —
+            // user reported a multi-second freeze on app launch where
+            // the window appeared but TL stayed empty with no input
+            // response. The culprit was the initial-load chain
+            // (ConfigureAwait(true)) doing 200 VM constructors and
+            // 200 IsBookmarked property writes synchronously on the UI
+            // dispatcher. We now build the new VM list + look up the
+            // bookmark set on the thread pool, then marshal back to UI
+            // only for the small cluster of operations that touch
+            // bound state (AttachItem subscription, _allItems mutation,
+            // ApplyCurrentFilter).
+            var events = await _timelineService.LoadAsync(TimelineFilter.Default, cts.Token).ConfigureAwait(false);
 
             // Reuse existing VMs by stable Id where possible — the Body /
             // BodyAuthorLogin / Unread state on a kept VM survives a Sync,
@@ -365,6 +403,7 @@ public partial class TimelineViewModel : ViewModelBase
             // don't snap back to "loading" until the next selection.
             var existingById = _allItems.ToDictionary(i => i.Id);
             var newAll = new List<TimelineItemViewModel>(events.Count);
+            var freshItems = new List<TimelineItemViewModel>();
             foreach (var ev in events)
             {
                 var id = ev.Id > 0 ? $"evt:{ev.Id}" : ev.NotificationId;
@@ -374,43 +413,30 @@ public partial class TimelineViewModel : ViewModelBase
                 }
                 else
                 {
+                    // Construct OFF-UI. No listeners attached yet, so the
+                    // ObservableProperty setters fire PropertyChanged into
+                    // a void — cheap. AttachItem is deferred to the UI
+                    // marshal below where it's safe to wire up the
+                    // listener chain.
                     var item = new TimelineItemViewModel(ev, _itemContextFactory());
-                    AttachItem(item);
                     newAll.Add(item);
+                    freshItems.Add(item);
                 }
             }
 
-            // Detach VMs that fell out of the master (retention prune /
-            // upstream deletion) so their PropertyChanged stops feeding
-            // RecomputeAggregates.
-            var newIds = new HashSet<string>(newAll.Select(i => i.Id), StringComparer.Ordinal);
-            foreach (var stale in _allItems)
-            {
-                if (!newIds.Contains(stale.Id))
-                {
-                    stale.PropertyChanged -= OnItemPropertyChanged;
-                }
-            }
-
-            _allItems.Clear();
-            _allItems.AddRange(newAll);
-            InvalidateTabCache();
-
-            // Hydrate bookmark flags from the local-state store. A single
-            // query covers every item; we then stamp each VM whose
-            // NotificationId is in the set. Survives across reloads
-            // because the source of truth is the DB.
+            // Bookmark hydration off-UI as well. Setting IsBookmarked on a
+            // not-yet-attached VM is free (PropertyChanged has no
+            // subscribers), so this avoids the 200 OnItemPropertyChanged →
+            // InvalidateTabCache calls we'd otherwise rack up on the UI
+            // thread.
+            IReadOnlySet<string>? bookmarkedIds = null;
             if (Bookmarks is not null && !string.IsNullOrEmpty(BookmarkAccountId))
             {
                 try
                 {
-                    var bookmarkedIds = await Bookmarks
+                    bookmarkedIds = await Bookmarks
                         .GetBookmarkedIdsAsync(BookmarkAccountId!, cts.Token)
-                        .ConfigureAwait(true);
-                    foreach (var item in _allItems)
-                    {
-                        item.IsBookmarked = bookmarkedIds.Contains(item.NotificationId);
-                    }
+                        .ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (cts.IsCancellationRequested) { throw; }
                 catch
@@ -419,8 +445,59 @@ public partial class TimelineViewModel : ViewModelBase
                     // the user can re-bookmark.
                 }
             }
+            if (bookmarkedIds is not null)
+            {
+                foreach (var item in newAll)
+                {
+                    var shouldBeBookmarked = bookmarkedIds.Contains(item.NotificationId);
+                    if (item.IsBookmarked != shouldBeBookmarked)
+                    {
+                        item.IsBookmarked = shouldBeBookmarked;
+                    }
+                }
+            }
 
-            ApplyCurrentFilter();
+            // Marshal back to UI for the bits that touch bound collections
+            // / fire PropertyChanged into now-live subscribers. In unit
+            // tests (no Avalonia Application bootstrapped), the
+            // dispatcher InvokeAsync deadlocks the test runner — fall
+            // back to inline execution on the current thread there.
+            Action uiBatch = () =>
+            {
+                if (cts.IsCancellationRequested) return;
+
+                // Wire up freshly constructed VMs.
+                foreach (var item in freshItems)
+                {
+                    AttachItem(item);
+                }
+
+                // Detach VMs that fell out of the master (retention prune /
+                // upstream deletion) so their PropertyChanged stops feeding
+                // RecomputeAggregates.
+                var newIds = new HashSet<string>(newAll.Select(i => i.Id), StringComparer.Ordinal);
+                foreach (var stale in _allItems)
+                {
+                    if (!newIds.Contains(stale.Id))
+                    {
+                        stale.PropertyChanged -= OnItemPropertyChanged;
+                    }
+                }
+
+                _allItems.Clear();
+                _allItems.AddRange(newAll);
+                InvalidateTabCache();
+
+                ApplyCurrentFilter();
+            };
+            if (Avalonia.Application.Current is null)
+            {
+                uiBatch();
+            }
+            else
+            {
+                await Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(uiBatch);
+            }
 
             // Backfill ActorLogin for rows that don't have one persisted yet.
             // Fires EnsureBodyLoadedAsync sequentially in the background so the

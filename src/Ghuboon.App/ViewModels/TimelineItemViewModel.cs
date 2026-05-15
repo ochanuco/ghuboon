@@ -773,6 +773,21 @@ public partial class TimelineItemViewModel : ViewModelBase
     public async Task EnsureBodyLoadedAsync(CancellationToken ct = default)
     {
         if (_bodyAttempted) return;
+        // _bodyAttempted is reset on cancellation (deadline / selection
+        // moved away) so a row can retry on the next select. But if a
+        // previous attempt succeeded and produced a Body, the data is
+        // already cached on this VM — skip the network round-trip even
+        // though _bodyAttempted is now false. Without this guard,
+        // re-visiting a previously-loaded row would refetch and could
+        // overwrite the existing Body with null when the second fetch
+        // fails (observed in production: bodyLen=0 after a 7-8 s
+        // timeout on stale connections).
+        if (!string.IsNullOrEmpty(Body))
+        {
+            _bodyAttempted = true;
+            BodyLoaded = true;
+            return;
+        }
         _bodyAttempted = true;
 
         // Hard deadline independent of HttpClient.Timeout. The handler-
@@ -814,12 +829,42 @@ public partial class TimelineItemViewModel : ViewModelBase
             // depth for the path where the inner catch's filter rejects
             // (e.g., future code that doesn't re-link the inner ct).
             _bodyAttempted = false;
-            IsLoadingBody = false;
-            BodyLoaded = true;
+            RunOnUi(() => { IsLoadingBody = false; BodyLoaded = true; });
             if (deadline.IsCancellationRequested && !ct.IsCancellationRequested)
             {
                 _ctx.Log?.Information("EnsureBodyLoadedAsync deadline (10 s) for {NotificationId}", NotificationId);
             }
+        }
+    }
+
+    /// <summary>
+    /// Set a UI-bound property on whichever thread the Avalonia dispatcher
+    /// is on. Body-load runs entirely off the UI thread (Task.Run-wrapped
+    /// at the call site), so naive `Body = ...` etc. from inside the
+    /// async chain raised PropertyChanged from the thread pool. Avalonia
+    /// 12 may silently drop / defer those notifications, which the user
+    /// perceived as the detail pane "hanging" while every other thread
+    /// looked idle. Route every PropertyChanged through this helper.
+    ///
+    /// Unit tests construct the VM without booting Avalonia, so
+    /// <c>Avalonia.Application.Current</c> is null. Fall back to inline
+    /// execution in that case — production always has an Application
+    /// instance.
+    /// </summary>
+    private static void RunOnUi(Action setter)
+    {
+        if (Avalonia.Application.Current is null)
+        {
+            setter();
+            return;
+        }
+        if (Avalonia.Threading.Dispatcher.UIThread.CheckAccess())
+        {
+            setter();
+        }
+        else
+        {
+            Avalonia.Threading.Dispatcher.UIThread.Post(setter);
         }
     }
 
@@ -830,12 +875,17 @@ public partial class TimelineItemViewModel : ViewModelBase
         //  1) read the canonical notifications row from the cache
         //  2) re-fetch via GET /notifications/threads/{thread_id} (reliable
         //     even when the cache lost it on the first sync)
+        // We use ConfigureAwait(false) throughout: this method runs on
+        // the thread pool (caller wraps with Task.Run), so capturing the
+        // sync context is unnecessary and `(true)` was misleading. The
+        // RunOnUi helper handles the actual UI-thread marshalling at
+        // each property-write boundary.
         var apiUrl = SubjectApiUrl;
         if (string.IsNullOrEmpty(apiUrl) && _ctx.Repository is { } repo)
         {
             try
             {
-                var canonical = await repo.GetByIdAsync(NotificationId, ct).ConfigureAwait(true);
+                var canonical = await repo.GetByIdAsync(NotificationId, ct).ConfigureAwait(false);
                 apiUrl = canonical?.Subject.ApiUrl;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { _bodyAttempted = false; throw; }
@@ -849,10 +899,10 @@ public partial class TimelineItemViewModel : ViewModelBase
         {
             try
             {
-                var pat = await provider(ct).ConfigureAwait(true);
+                var pat = await provider(ct).ConfigureAwait(false);
                 if (!string.IsNullOrEmpty(pat))
                 {
-                    apiUrl = await api.GetThreadSubjectUrlAsync(pat, ThreadId, ct).ConfigureAwait(true);
+                    apiUrl = await api.GetThreadSubjectUrlAsync(pat, ThreadId, ct).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { _bodyAttempted = false; throw; }
@@ -861,17 +911,17 @@ public partial class TimelineItemViewModel : ViewModelBase
 
         if (_ctx.Api is null || _ctx.PatProvider is null || string.IsNullOrEmpty(apiUrl))
         {
-            BodyLoaded = true;
+            RunOnUi(() => BodyLoaded = true);
             return;
         }
 
         try
         {
-            IsLoadingBody = true;
-            var pat = await _ctx.PatProvider(ct).ConfigureAwait(true);
+            RunOnUi(() => IsLoadingBody = true);
+            var pat = await _ctx.PatProvider(ct).ConfigureAwait(false);
             if (string.IsNullOrEmpty(pat))
             {
-                BodyLoaded = true;
+                RunOnUi(() => BodyLoaded = true);
                 return;
             }
 
@@ -898,7 +948,7 @@ public partial class TimelineItemViewModel : ViewModelBase
 
             var fetched = await _ctx.Api
                 .GetSubjectBodyAndAuthorAsync(pat, targetUrl, ct)
-                .ConfigureAwait(true);
+                .ConfigureAwait(false);
 
             // Comment events fall back to a thread-level latest-comment
             // probe when the per-event /comments/{id} URL is missing
@@ -913,26 +963,44 @@ public partial class TimelineItemViewModel : ViewModelBase
             {
                 var probe = await _ctx.Api
                     .GetLatestCommentDetailsAsync(pat, ThreadId, ct)
-                    .ConfigureAwait(true);
+                    .ConfigureAwait(false);
                 content = probe.Body;
                 bodyAuthor = probe.AuthorLogin;
             }
 
-            Body = StripHtmlComments(content);
-            BodyAuthorLogin = bodyAuthor;
+            var sanitizedBody = StripHtmlComments(content);
+            // Only apply when we actually got content. An empty fetch
+            // result on a previously-empty row leaves Body null and
+            // the BodyLoaded flip below settles the spinner state;
+            // on a row that already had Body, the early-return guard
+            // at method entry prevents us from reaching here, so this
+            // branch only sees genuinely-new content.
+            if (!string.IsNullOrEmpty(sanitizedBody))
+            {
+                // Single batched marshal so Body and BodyAuthorLogin
+                // (and the cascading BodyBlocks /
+                // BodyDisplayAsPlainText / BodyIsLongFormPlainText /
+                // BodyShouldShowMarkdown notifies) all hit the
+                // binding system together on the UI thread.
+                RunOnUi(() =>
+                {
+                    Body = sanitizedBody;
+                    BodyAuthorLogin = bodyAuthor;
+                });
+            }
 
             // Persist the body to the per-event cache so subsequent renders
             // (next reload, future sessions) read from the local DB and
             // don't re-hit the GitHub API for the same row. Only writes
             // when we actually got content; an empty fetch leaves the row
             // null so the next selection retries.
-            if (!string.IsNullOrEmpty(Body)
+            if (!string.IsNullOrEmpty(sanitizedBody)
                 && _ctx.EventRepository is { } bodyRepo
                 && EventLocalId is { } bodyEventId)
             {
                 try
                 {
-                    await bodyRepo.SetBodyAsync(bodyEventId, Body, BodyAuthorLogin, ct).ConfigureAwait(true);
+                    await bodyRepo.SetBodyAsync(bodyEventId, sanitizedBody, bodyAuthor, ct).ConfigureAwait(false);
                 }
                 catch (Exception ex)
                 {
@@ -946,13 +1014,13 @@ public partial class TimelineItemViewModel : ViewModelBase
             if (!string.IsNullOrEmpty(bodyAuthor))
             {
                 var authorLogin = bodyAuthor;
-                ActorLogin = authorLogin;
+                RunOnUi(() => ActorLogin = authorLogin);
 
                 if (_ctx.EventRepository is { } evRepo && EventLocalId is { } eventId)
                 {
                     try
                     {
-                        await evRepo.SetActorLoginAsync(eventId, authorLogin!, ct).ConfigureAwait(true);
+                        await evRepo.SetActorLoginAsync(eventId, authorLogin!, ct).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
@@ -964,7 +1032,7 @@ public partial class TimelineItemViewModel : ViewModelBase
                 {
                     try
                     {
-                        await notifRepo.SetActorLoginAsync(NotificationId, authorLogin!, ct).ConfigureAwait(true);
+                        await notifRepo.SetActorLoginAsync(NotificationId, authorLogin!, ct).ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
@@ -973,7 +1041,7 @@ public partial class TimelineItemViewModel : ViewModelBase
                 }
             }
 
-            BodyLoaded = true;
+            RunOnUi(() => BodyLoaded = true);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -985,7 +1053,7 @@ public partial class TimelineItemViewModel : ViewModelBase
             // loading spinner state. _bodyAttempted=false allows retry
             // on the next selection.
             _bodyAttempted = false;
-            BodyLoaded = true;
+            RunOnUi(() => BodyLoaded = true);
         }
         catch (Exception ex)
         {
@@ -994,11 +1062,11 @@ public partial class TimelineItemViewModel : ViewModelBase
             // spinner forever after a transient fetch failure. The user can
             // still re-trigger by reloading the timeline; _bodyAttempted
             // stays true so we don't hammer GitHub for a known-bad row.
-            BodyLoaded = true;
+            RunOnUi(() => BodyLoaded = true);
         }
         finally
         {
-            IsLoadingBody = false;
+            RunOnUi(() => IsLoadingBody = false);
         }
     }
 
