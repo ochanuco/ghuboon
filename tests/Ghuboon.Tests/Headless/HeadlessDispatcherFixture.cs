@@ -72,21 +72,40 @@ internal static class HeadlessDispatcherFixture
             // the test thread can keep marshalling work in — launch on a
             // dedicated thread and wait until the dispatcher is alive.
             var ready = new ManualResetEventSlim();
+            // Capture any boot-time exception so the caller fails loudly
+            // instead of blocking on ready.Wait() forever when
+            // SetupWithoutStarting / UseHeadless throws. (Earlier
+            // iteration of this fixture used a ModuleInitializer and a
+            // bad UseHeadless call silently hung the entire test run —
+            // discovery never made it past "Discovering: Ghuboon.Tests".)
+            Exception? bootException = null;
             var thread = new Thread(() =>
             {
-                var builder = AppBuilder.Configure<HeadlessTestApp>()
-                    .UseHeadless(new AvaloniaHeadlessPlatformOptions
-                    {
-                        // No pixel assertions, so the SkiaSharp back-buffer
-                        // is dead weight — saves ~30% per test.
-                        UseHeadlessDrawing = true,
-                    });
-                builder.SetupWithoutStarting();
-
-                // Signal as soon as the dispatcher is wired but BEFORE we
-                // start the message loop, so RunOnDispatcher.Invoke can
-                // proceed even while we sit in Run().
-                ready.Set();
+                try
+                {
+                    var builder = AppBuilder.Configure<HeadlessTestApp>()
+                        .UseHeadless(new AvaloniaHeadlessPlatformOptions
+                        {
+                            // No pixel assertions, so the SkiaSharp
+                            // back-buffer is dead weight — saves ~30%
+                            // per test.
+                            UseHeadlessDrawing = true,
+                        });
+                    builder.SetupWithoutStarting();
+                }
+                catch (Exception ex)
+                {
+                    bootException = ex;
+                    return; // ready.Set() is in finally below.
+                }
+                finally
+                {
+                    // Always release the caller, even on failure — the
+                    // caller's timeout / null-check on bootException
+                    // surfaces the real error message instead of a
+                    // generic deadlock.
+                    ready.Set();
+                }
                 Dispatcher.UIThread.MainLoop(CancellationToken.None);
             })
             {
@@ -94,7 +113,23 @@ internal static class HeadlessDispatcherFixture
                 Name = "Ghuboon.HeadlessDispatcher",
             };
             thread.Start();
-            ready.Wait();
+
+            // 30s is generous — SetupWithoutStarting completes in
+            // ~50ms on a warm process. A miss means Avalonia static
+            // init is wedged, not slow; bail fast so xUnit prints the
+            // failure instead of letting the test session hang.
+            if (!ready.Wait(TimeSpan.FromSeconds(30)))
+            {
+                throw new TimeoutException(
+                    "Avalonia headless dispatcher did not signal ready within 30s. "
+                    + "Either AppBuilder.SetupWithoutStarting hung or the boot thread was never scheduled.");
+            }
+            if (bootException is not null)
+            {
+                throw new InvalidOperationException(
+                    "Avalonia headless dispatcher boot failed; see inner exception.",
+                    bootException);
+            }
 
             _started = true;
         }
