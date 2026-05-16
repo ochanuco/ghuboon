@@ -12,6 +12,14 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <!-- Headless E2E: boots a real Avalonia dispatcher in-process without a
+         display so tests can exercise UIThread.InvokeAsync marshalling (the
+         chain that produced the silently-dropped PropertyChanged regressions
+         earlier this cycle). We use the bare Avalonia.Headless package and
+         drive Dispatcher.UIThread ourselves — the .XUnit adapter package
+         depends on xunit v3 and would conflict with the rest of the suite
+         on xunit v2. -->
+    <PackageReference Include="Avalonia.Headless" Version="12.0.2" />
   </ItemGroup>
 
   <ItemGroup>
