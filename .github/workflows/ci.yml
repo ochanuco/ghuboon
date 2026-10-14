@@ -20,6 +20,12 @@ jobs:
       runs-on: macos-latest
       dotnet-version: 10.0.x
       test-results: "**/TestResults/*.trx"
+      # Two test invocations so the Avalonia headless smoke runs in a
+      # fresh test-host process. Booting the headless dispatcher claims
+      # Dispatcher.UIThread; if a non-headless test in the same process
+      # already touched Avalonia statics, SetupUnsafe fails on
+      # VerifyAccess. Splitting by Category=Headless gives each set its
+      # own process.
       run: |
         dotnet restore
         dotnet build --configuration Release --no-restore
