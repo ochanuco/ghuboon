@@ -1,51 +1,27 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+    branches: [main]
+  push:
     branches: [main]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  build-test:
-    runs-on: macos-latest
-    env:
-      DOTNET_CLI_TELEMETRY_OPTOUT: 1
-      DOTNET_NOLOGO: 1
-      DOTNET_GENERATE_ASPNET_CERTIFICATE: false
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Setup .NET 10
-        uses: actions/setup-dotnet@c2fa09f4bde5ebb9d1777cf28262a3eb3db3ced7 # v5.2.0
-        with:
-          dotnet-version: 10.0.x
-
-      - name: Restore
-        run: dotnet restore
-
-      - name: Build
-        run: dotnet build --configuration Release --no-restore
-
-      # Two test invocations so the Avalonia headless smoke runs in a
-      # fresh test-host process. Booting the headless dispatcher claims
-      # Dispatcher.UIThread; if a non-headless test in the same process
-      # already touched Avalonia statics, SetupUnsafe fails on
-      # VerifyAccess. Splitting by Category=Headless gives each set its
-      # own process.
-      - name: Test (non-headless)
-        run: dotnet test --configuration Release --no-build --filter "Category!=Headless" --logger "trx;LogFileName=test-results.trx"
-
-      - name: Test (headless E2E)
-        run: dotnet test --configuration Release --no-build --filter "Category=Headless" --logger "trx;LogFileName=test-results-headless.trx"
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: test-results
-          path: '**/TestResults/*.trx'
-          if-no-files-found: ignore
+  ci:
+    uses: ochanuco/.github/.github/workflows/dotnet.yml@e5102a8ff65b3c15a2afa263d4970dbbe6538862 # v1.1.0
+    with:
+      runs-on: macos-latest
+      dotnet-version: 10.0.x
+      test-results: "**/TestResults/*.trx"
+      run: |
+        dotnet restore
+        dotnet build --configuration Release --no-restore
+        dotnet test --configuration Release --no-build --filter "Category!=Headless" --logger "trx;LogFileName=test-results.trx"
+        dotnet test --configuration Release --no-build --filter "Category=Headless" --logger "trx;LogFileName=test-results-headless.trx"
